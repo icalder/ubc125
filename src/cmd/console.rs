@@ -11,7 +11,8 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Modifier, Style},
+    style::{Modifier, Style, Color},
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Row, Table, Tabs},
     Terminal,
 };
@@ -41,7 +42,7 @@ struct ScanStatus {
 impl Default for ScanStatus {
     fn default() -> Self {
         Self {
-            frequency: "---.----".to_string(),
+            frequency: "---".to_string(),
             bank: "-".to_string(),
             channel_name: "".to_string(),
             raw: "".to_string(),
@@ -62,6 +63,7 @@ struct App {
     channels: Vec<Option<Channel>>,
     fetch_queue: VecDeque<u32>,
     in_prg_mode: bool,
+    banks: Vec<bool>, // 10 banks (0-9 corresponds to Bank 1-10)
 }
 
 impl App {
@@ -71,17 +73,42 @@ impl App {
             tabs.push(format!("Bank {}", i));
         }
 
+        let model = send_command(port, "MDL");
+        let version = send_command(port, "VER");
+        let volume = send_command(port, "VOL");
+        let squelch = send_command(port, "SQL");
+
+        // Fetch initial bank status
+        // Enter PRG mode temporarily
+        let _ = send_command(port, "PRG");
+        let scg_resp = send_command(port, "SCG");
+        let _ = send_command(port, "EPG");
+        let _ = send_command(port, "KEY,S,P");
+
+        // Parse SCG: SCG,0101010101 (0=On, 1=Off)
+        let mut banks = vec![true; 10]; // Default all on if parse fails
+        let parts: Vec<&str> = scg_resp.split(',').collect();
+        if parts.len() >= 2 && parts[0] == "SCG" {
+            let mask = parts[1].trim();
+            if mask.len() >= 10 {
+                for (i, c) in mask.chars().take(10).enumerate() {
+                    banks[i] = c == '0';
+                }
+            }
+        }
+
         Self {
-            model: send_command(port, "MDL"),
-            version: send_command(port, "VER"),
-            volume: send_command(port, "VOL"),
-            squelch: send_command(port, "SQL"),
+            model,
+            version,
+            volume,
+            squelch,
             scan_status: ScanStatus::default(),
             tabs,
             selected_tab: 0,
             channels: vec![None; 501], // 1-based indexing, 500 channels
             fetch_queue: VecDeque::new(),
             in_prg_mode: false,
+            banks,
         }
     }
 
@@ -168,6 +195,14 @@ impl App {
                  }
             }
         }
+    }
+
+    fn get_scg_string(&self) -> String {
+        let mut s = String::from("SCG,");
+        for &b in &self.banks {
+            s.push(if b { '0' } else { '1' });
+        }
+        s
     }
 }
 
@@ -288,13 +323,17 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                         [
                             Constraint::Length(6),
                             Constraint::Length(6),
+                            Constraint::Length(3), // Banks
                         ]
                         .as_ref(),
                     )
                     .split(chunks[1]);
 
                 let info_text = format!(
-                    "Model:   {}\nVersion: {}\nVolume:  {}\nSquelch: {}",
+                    "Model:   {}
+Version: {}
+Volume:  {}
+Squelch: {}",
                     app.model, app.version, app.volume, app.squelch
                 );
                 let info_paragraph = Paragraph::new(info_text)
@@ -302,7 +341,9 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                 f.render_widget(info_paragraph, monitor_chunks[0]);
 
                 let scan_text = format!(
-                    "Bank:      {}\nFrequency: {} MHz\nChannel:   {}",
+                    "Bank:      {}
+Frequency: {} MHz
+Channel:   {}",
                     app.scan_status.bank,
                     app.scan_status.frequency,
                     app.scan_status.channel_name
@@ -310,6 +351,22 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let scan_paragraph = Paragraph::new(scan_text)
                     .block(Block::default().title("Live Scan").borders(Borders::ALL));
                 f.render_widget(scan_paragraph, monitor_chunks[1]);
+
+                // Bank Status
+                let mut bank_spans = vec![Span::raw("Banks: ")];
+                for (i, &active) in app.banks.iter().enumerate() {
+                    let bank_num = i + 1;
+                    let style = if active {
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    bank_spans.push(Span::styled(format!("[{}] ", bank_num % 10), style));
+                }
+                let banks_paragraph = Paragraph::new(Line::from(bank_spans))
+                    .block(Block::default().title("Active Banks (Press 1-0 to toggle)").borders(Borders::ALL));
+                f.render_widget(banks_paragraph, monitor_chunks[2]);
+
             } else {
                 // Bank View
                 let bank = app.selected_tab as u32;
@@ -361,7 +418,7 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let help_keys = if app.selected_tab == 0 {
-                "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, 'q': Quit."
+                "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, '1-0': Toggle Banks, 'q': Quit."
             } else {
                 "Use Left/Right to switch tabs. 'q': Quit."
             };
@@ -372,7 +429,6 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
         // Poll for input
-        // If queue is busy, don't wait long for input
         let poll_timeout = if !app.fetch_queue.is_empty() {
             Duration::from_millis(1) 
         } else {
@@ -391,6 +447,21 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('h') if app.selected_tab == 0 => {
                          let _ = send_command(&mut port, "KEY,H,P");
                     },
+                    KeyCode::Char(c) if app.selected_tab == 0 && c.is_digit(10) => {
+                        if let Some(digit) = c.to_digit(10) {
+                            // 1->0, 2->1, ... 0->9
+                            let bank_idx = if digit == 0 { 9 } else { digit - 1 } as usize;
+                            if bank_idx < 10 {
+                                app.banks[bank_idx] = !app.banks[bank_idx];
+                                let scg_cmd = app.get_scg_string();
+                                // Apply change
+                                let _ = send_command(&mut port, "PRG");
+                                let _ = send_command(&mut port, &scg_cmd);
+                                let _ = send_command(&mut port, "EPG");
+                                let _ = send_command(&mut port, "KEY,S,P");
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -425,6 +496,7 @@ mod tests {
             channels: vec![],
             fetch_queue: VecDeque::new(),
             in_prg_mode: false,
+            banks: vec![true; 10],
         };
 
         // Example from SCANNER-COMMANDS.md: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
@@ -448,6 +520,7 @@ mod tests {
             channels: vec![],
             fetch_queue: VecDeque::new(),
             in_prg_mode: false,
+            banks: vec![true; 10],
         };
 
         // Test with a frequency < 100MHz (padding check)
