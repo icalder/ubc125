@@ -42,7 +42,7 @@ These commands are documented in the BC125AT Operation Specification.
 ## Reverse Engineered Commands
 | Command | Description | Mode | Controller Format (Get/Action) | Controller Format (Set) | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **GLG** | Current Scanning Status | All | `GLG` | - | Example output: GLG,01285500,AM,,0,,,GLOS APPR, |
+| **GLG** | Current Scanning Status | All | `GLG` | - | GLG,[Freq],[Modulation],,[0],,,[Channel Name],0,1,,[Channel Index], Example : GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52, |
 | **STS** | Another Status Command | All | `STS` | - ||
 | **KEY** | Send KeyPress | All | `KEY` | `KEY,[K1],[K2]` | Sends KeyPresses as if scanner physical buttons had been pressed |
 
