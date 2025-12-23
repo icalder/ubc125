@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package ubc125.v1;
+
+service SystemInfoService {
+  rpc GetModelInfo (GetModelInfoRequest) returns (GetModelInfoResponse);
+  rpc GetFirmwareVersion (GetFirmwareVersionRequest) returns (GetFirmwareVersionResponse);
+}
+
+message GetModelInfoRequest {
+  // No fields required for this request
+}
+
+message GetModelInfoResponse {
+  string result = 1;
+}
+
+message GetFirmwareVersionRequest {
+  // No fields required for this request
+}
+
+message GetFirmwareVersionResponse {
+  string result = 1;
+}

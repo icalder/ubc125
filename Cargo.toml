@@ -13,4 +13,4 @@ tonic = "0.14.2"
 tonic-reflection = "0.14.2"
 tonic-web = "0.14.2"
 tower-http = { version = "0.6.6", features = ["cors"] }
-ubc125-grpc = { version = "0.1.0", path = "../../grpc/ubc125/rust-gen" }
+ubc125-grpc = { version = "0.1.0", path = "./lib/grpc/rust-gen" }

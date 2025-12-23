@@ -11,25 +11,58 @@
       rust-overlay,
     }:
     let
-      system = "x86_64-linux";
-      pkgs = import nixpkgs {
-        inherit system;
-        overlays = [ rust-overlay.overlays.default ];
-      };
-      toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+      forAllSys = nixpkgs.lib.genAttrs nixpkgs.lib.platforms.all;
     in
     {
-      devShells.${system}.default = pkgs.mkShell {
-        packages = [
-          pkgs.socat
-          pkgs.protobuf
-          toolchain
+      devShells = forAllSys (
+        system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [
+              pkgs.socat
+              pkgs.protobuf
+              toolchain
 
-          # We want the unwrapped version, "rust-analyzer" (wrapped) comes with nixpkgs' toolchain
-          pkgs.rust-analyzer-unwrapped
-        ];
+              # We want the unwrapped version, "rust-analyzer" (wrapped) comes with nixpkgs' toolchain
+              pkgs.rust-analyzer-unwrapped
+            ];
 
-        RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
-      };
+            RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
+          };
+        }
+      );
+
+      packages = forAllSys (
+        system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+        in
+        {
+          ubc125 = pkgs.rustPlatform.buildRustPackage {
+            pname = "ubc125";
+            version = "0.1.0";
+
+            src = pkgs.lib.cleanSource ./.;
+
+            cargoLock.lockFile = ./Cargo.lock;
+
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.protobuf
+            ];
+            # buildInputs = [ pkgs.openssl ]; # Example of adding a runtime dependency
+          };
+        }
+      );
     };
 }
