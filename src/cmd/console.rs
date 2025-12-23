@@ -37,6 +37,7 @@ struct ScanStatus {
     bank: String,
     channel_name: String,
     raw: String,
+    signal_detected: bool,
 }
 
 impl Default for ScanStatus {
@@ -46,6 +47,7 @@ impl Default for ScanStatus {
             bank: "-".to_string(),
             channel_name: "".to_string(),
             raw: "".to_string(),
+            signal_detected: false,
         }
     }
 }
@@ -182,6 +184,12 @@ impl App {
             }
 
             self.scan_status.channel_name = parts[7].trim().to_string();
+
+            // Signal Status appears to be at index 8 (1 = Squelch Open/Detected)
+            // Based on example: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
+            if parts.len() > 8 {
+                 self.scan_status.signal_detected = parts[8].trim() == "1";
+            }
             
             // Calculate bank from Channel Index (index 11)
             // Example: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
@@ -348,8 +356,15 @@ Channel:   {}",
                     app.scan_status.frequency,
                     app.scan_status.channel_name
                 );
+
+                let scan_style = if app.scan_status.signal_detected {
+                    Style::default().bg(Color::Rgb(255, 165, 0)).fg(Color::Black)
+                } else {
+                    Style::default()
+                };
+
                 let scan_paragraph = Paragraph::new(scan_text)
-                    .block(Block::default().title("Live Scan").borders(Borders::ALL));
+                    .block(Block::default().title("Live Scan").borders(Borders::ALL).style(scan_style));
                 f.render_widget(scan_paragraph, monitor_chunks[1]);
 
                 // Bank Status
@@ -529,5 +544,32 @@ mod tests {
         assert_eq!(app.scan_status.frequency, "88.1000");
         assert_eq!(app.scan_status.bank, "1");
         assert_eq!(app.scan_status.channel_name, "BBC R2");
+    }
+
+    #[test]
+    fn test_parse_glg_signal_detected() {
+        let mut app = App {
+            model: "".into(),
+            version: "".into(),
+            volume: "".into(),
+            squelch: "".into(),
+            scan_status: ScanStatus::default(),
+            tabs: vec![],
+            selected_tab: 0,
+            channels: vec![],
+            fetch_queue: VecDeque::new(),
+            in_prg_mode: false,
+            banks: vec![true; 10],
+        };
+
+        // Case 1: Signal Detected (Index 8 = 1)
+        // Example: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
+        app.update_scan_status("GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,".to_string());
+        assert!(app.scan_status.signal_detected);
+        assert_eq!(app.scan_status.channel_name, "BHX RADAR");
+
+        // Case 2: No Signal (Index 8 = 0)
+        app.update_scan_status("GLG,01239750,AM,,0,,,QUIET,0,0,,52,".to_string());
+        assert!(!app.scan_status.signal_detected);
     }
 }

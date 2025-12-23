@@ -1,5 +1,17 @@
 # UBC 125 Serial Control
 
+## Quick build, deploy and test
+
+```sh
+# Build the package for AArch64
+nix build .#packages.aarch64-linux.ubc125
+ssh # to get store path
+
+# Push the result to the Pi and run it
+nix-copy-closure --to itcalde@alarmpi ./result
+/nix/store/2x8lqzkr2m8srwwcifak3yv0pjcs3ad0-ubc125-0.1.0/bin/ubc125 console
+```
+
 ## Minicom
 nix-shell -p minicom
 minicom --device /dev/ttyACM0
