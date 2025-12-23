@@ -19,7 +19,7 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
     for p in &ports {
         println!("{}", p.port_name);
     }
-    let mut port = serialport::new("/dev/ttyACM0", 115_200)
+    let mut port = serialport::new(&args.console_device, 115_200)
         .timeout(Duration::from_millis(100))
         .open()
         .expect("Failed to open port");

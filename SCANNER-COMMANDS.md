@@ -40,5 +40,29 @@ These commands are documented in the BC125AT Operation Specification.
 | **SQL** | Get/Set Squelch Level | All | `SQL` | `SQL,[LEVEL]` | `LEVEL`: 0(Open) - 14 - 15(Close). |
 
 ## Reverse Engineered Commands
+| Command | Description | Mode | Controller Format (Get/Action) | Controller Format (Set) | Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **GLG** | Current Scanning Status | All | `GLG` | - | Example output: GLG,01285500,AM,,0,,,GLOS APPR, |
+| **STS** | Another Status Command | All | `STS` | - ||
+| **KEY** | Send KeyPress | All | `KEY` | `KEY,[K1],[K2]` | Sends KeyPresses as if scanner physical buttons had been pressed |
 
-*To be populated.*
+
+## Miscellaneous Command Examples
+
+### Scan bank 2
+
+PRG
+SCG,1011111111
+EPG
+
+## Start Scan
+
+Note: this would be required after using `SCG` to change selection of scan channel banks, for example.
+
+KEY,S,P
+
+## Hold Scan
+
+Note: this can be repeated to toggle hold.
+
+KEY,H,P

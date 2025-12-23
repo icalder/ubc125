@@ -21,6 +21,7 @@
     {
       devShells.${system}.default = pkgs.mkShell {
         packages = [
+          pkgs.socat
           pkgs.protobuf
           toolchain
 
