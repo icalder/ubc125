@@ -1,0 +1,5 @@
+[toolchain]
+channel = "stable"
+# https://rust-lang.github.io/rustup/concepts/components.html
+components = [ "rust-src" ]
+profile = "default"

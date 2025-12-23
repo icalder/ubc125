@@ -1,0 +1,14 @@
+[package]
+name = "ubc125"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.47", features = ["derive", "env"] }
+serialport = { version = "4.7.3", default-features = false }
+tokio = { version = "1.47.1", features = ["full"] }
+tonic = "0.14.2"
+tonic-reflection = "0.14.2"
+tonic-web = "0.14.2"
+tower-http = { version = "0.6.6", features = ["cors"] }
+ubc125-grpc = { version = "0.1.0", path = "../../grpc/ubc125/rust-gen" }
