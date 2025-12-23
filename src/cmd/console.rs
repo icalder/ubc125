@@ -117,7 +117,7 @@ impl App {
         }
     }
 
-    fn update_channel(&mut self, response: String) {
+    fn update_channel(&mut self, response: String) -> bool {
         // Expected format: CIN,[INDEX],[NAME],[FRQ],[MOD],...
         let parts: Vec<&str> = response.split(',').collect();
         if parts.len() >= 5 && parts[0] == "CIN" {
@@ -129,9 +129,11 @@ impl App {
                         frequency: parts[3].to_string(),
                         modulation: parts[4].to_string(),
                     });
+                    return true;
                 }
             }
         }
+        false
     }
 
     fn update_scan_status(&mut self, response: String) {
@@ -176,16 +178,32 @@ fn send_command(port: &mut Box<dyn SerialPort>, cmd: &str) -> String {
         return format!("Write Error: {}", e);
     }
     
-    // Simple read with timeout
-    // In a real app we should read until \r
-    let mut serial_buf: Vec<u8> = vec![0; 1024];
-    match port.read(serial_buf.as_mut_slice()) {
-        Ok(t) => {
-            let response = String::from_utf8_lossy(&serial_buf[..t]);
-            response.trim().to_string()
-        },
-        Err(e) => format!("Read Error: {}", e),
+    let mut response = String::new();
+    let mut buf = [0u8; 1];
+    let start = Instant::now();
+    let timeout = Duration::from_millis(500);
+
+    loop {
+        if start.elapsed() > timeout {
+             break;
+        }
+        match port.read(&mut buf) {
+            Ok(n) if n > 0 => {
+                let c = buf[0] as char;
+                if c == '\r' {
+                    break;
+                }
+                // Ignore newlines if they appear before \r (unlikely) or just append
+                if c != '\n' {
+                    response.push(c);
+                }
+            }
+            Ok(_) => {},
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {},
+            Err(e) => return format!("Read Error: {}", e),
+        }
     }
+    response.trim().to_string()
 }
 
 pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -216,6 +234,8 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
             app.in_prg_mode = true;
         } else if app.selected_tab == 0 && app.in_prg_mode {
             let _ = send_command(&mut port, "EPG");
+            // Automatically resume scanning when returning to Monitor
+            let _ = send_command(&mut port, "KEY,S,P");
             app.in_prg_mode = false;
             app.fetch_queue.clear();
         }
@@ -224,7 +244,10 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
         if app.in_prg_mode {
             if let Some(idx) = app.fetch_queue.pop_front() {
                 let resp = send_command(&mut port, &format!("CIN,{}", idx));
-                app.update_channel(resp);
+                if !app.update_channel(resp) {
+                     // Retry if failed (push to back)
+                     app.fetch_queue.push_back(idx);
+                }
             }
         } else {
             // Poll scanner status only in Monitor mode
@@ -326,13 +349,24 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                 f.render_widget(table, chunks[1]);
             }
 
+            let mode_str = if app.in_prg_mode { "Remote (PRG)" } else { "Monitor" };
             let status_msg = if !app.fetch_queue.is_empty() {
-                format!("Loading... {} remaining", app.fetch_queue.len())
+                format!("Loading... {} remaining ({})", app.fetch_queue.len(), mode_str)
             } else {
-                app.scan_status.raw.clone()
+                if app.selected_tab == 0 {
+                    app.scan_status.raw.clone()
+                } else {
+                    format!("Ready ({})", mode_str)
+                }
             };
 
-            let help_text = Paragraph::new(format!("Use Left/Right to switch tabs. 'q' to quit.\nStatus: {}", status_msg))
+            let help_keys = if app.selected_tab == 0 {
+                "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, 'q': Quit."
+            } else {
+                "Use Left/Right to switch tabs. 'q': Quit."
+            };
+
+            let help_text = Paragraph::new(format!("{}\nStatus: {}", help_keys, status_msg))
                 .block(Block::default().title("Help").borders(Borders::ALL));
              f.render_widget(help_text, chunks[2]);
         })?;
@@ -351,6 +385,12 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('q') => break,
                     KeyCode::Right => app.next_tab(),
                     KeyCode::Left => app.previous_tab(),
+                    KeyCode::Char('s') if app.selected_tab == 0 => {
+                         let _ = send_command(&mut port, "KEY,S,P");
+                    },
+                    KeyCode::Char('h') if app.selected_tab == 0 => {
+                         let _ = send_command(&mut port, "KEY,H,P");
+                    },
                     _ => {}
                 }
             }
@@ -380,6 +420,11 @@ mod tests {
             volume: "".into(),
             squelch: "".into(),
             scan_status: ScanStatus::default(),
+            tabs: vec![],
+            selected_tab: 0,
+            channels: vec![],
+            fetch_queue: VecDeque::new(),
+            in_prg_mode: false,
         };
 
         // Example from SCANNER-COMMANDS.md: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
@@ -398,6 +443,11 @@ mod tests {
             volume: "".into(),
             squelch: "".into(),
             scan_status: ScanStatus::default(),
+            tabs: vec![],
+            selected_tab: 0,
+            channels: vec![],
+            fetch_queue: VecDeque::new(),
+            in_prg_mode: false,
         };
 
         // Test with a frequency < 100MHz (padding check)
