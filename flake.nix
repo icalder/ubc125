@@ -11,9 +11,57 @@
       rust-overlay,
     }:
     let
-      forAllSys = nixpkgs.lib.genAttrs nixpkgs.lib.platforms.all;
+      # Systems we want to be able to build ON (e.g. your laptop)
+      supportedSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      forAllSys = nixpkgs.lib.genAttrs supportedSystems;
+
+      # Helper to create a package definition so we don't repeat ourselves
+      makeUbcPackage =
+        pkgs:
+        pkgs.rustPlatform.buildRustPackage {
+          pname = "ubc125";
+          version = "0.2.0";
+          src = pkgs.lib.cleanSource ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.protobuf
+          ];
+          # buildInputs = [ pkgs.udev ]; # Add if needed
+        };
     in
     {
+      packages = forAllSys (
+        system:
+        let
+          # Standard native packages
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
+          };
+
+          # Cross-compilation pkgs: Host is 'system' (x86), Target is 'aarch64'
+          pkgsCross = import nixpkgs {
+            inherit system;
+            # crossSystem is a special configuration parameter passed to the nixpkgs import
+            crossSystem = "aarch64-linux";
+            overlays = [ rust-overlay.overlays.default ];
+          };
+        in
+        {
+          # 1. Native Build (runs 'nix build .#ubc125')
+          ubc125 = makeUbcPackage pkgs;
+
+          # 2. Cross Build (runs 'nix build .#ubc125-aarch64')
+          ubc125-aarch64 = makeUbcPackage pkgsCross;
+
+          default = self.packages.${system}.ubc125;
+        }
+      );
+
       devShells = forAllSys (
         system:
         let
@@ -26,41 +74,12 @@
         {
           default = pkgs.mkShell {
             packages = [
-              pkgs.socat
-              pkgs.protobuf
               toolchain
-
-              # We want the unwrapped version, "rust-analyzer" (wrapped) comes with nixpkgs' toolchain
-              pkgs.rust-analyzer-unwrapped
-            ];
-
-            RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
-          };
-        }
-      );
-
-      packages = forAllSys (
-        system:
-        let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ rust-overlay.overlays.default ];
-          };
-        in
-        {
-          ubc125 = pkgs.rustPlatform.buildRustPackage {
-            pname = "ubc125";
-            version = "0.1.0";
-
-            src = pkgs.lib.cleanSource ./.;
-
-            cargoLock.lockFile = ./Cargo.lock;
-
-            nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.protobuf
+              pkgs.rust-analyzer-unwrapped
             ];
-            # buildInputs = [ pkgs.openssl ]; # Example of adding a runtime dependency
+            RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
           };
         }
       );

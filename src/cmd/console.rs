@@ -10,10 +10,10 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style, Color},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Row, Table, Tabs},
+    widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Tabs},
     Terminal,
 };
 use serialport::SerialPort;
@@ -30,6 +30,28 @@ struct Channel {
     name: String,
     frequency: String,
     modulation: String,
+}
+
+#[derive(Default, PartialEq)]
+enum InputMode {
+    #[default]
+    Normal,
+    Editing(EditState),
+    ConfirmDelete,
+}
+
+#[derive(Clone, Default, PartialEq)]
+enum EditField {
+    #[default]
+    Frequency,
+    Name,
+}
+
+#[derive(Clone, Default, PartialEq)]
+struct EditState {
+    frequency: String,
+    name: String,
+    active_field: EditField,
 }
 
 struct ScanStatus {
@@ -66,6 +88,8 @@ struct App {
     fetch_queue: VecDeque<u32>,
     in_prg_mode: bool,
     banks: Vec<bool>, // 10 banks (0-9 corresponds to Bank 1-10)
+    input_mode: InputMode,
+    table_state: TableState,
 }
 
 impl App {
@@ -111,6 +135,8 @@ impl App {
             fetch_queue: VecDeque::new(),
             in_prg_mode: false,
             banks,
+            input_mode: InputMode::Normal,
+            table_state: TableState::default().with_selected(Some(0)),
         }
     }
 
@@ -126,6 +152,43 @@ impl App {
             self.selected_tab = self.tabs.len() - 1;
         }
         self.queue_channels_for_tab();
+    }
+
+    fn next_channel(&mut self) {
+        let i = match self.table_state.selected() {
+            Some(i) => {
+                if i >= 49 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.table_state.select(Some(i));
+    }
+
+    fn previous_channel(&mut self) {
+        let i = match self.table_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    49
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.table_state.select(Some(i));
+    }
+
+    fn selected_channel_index(&self) -> u32 {
+        if self.selected_tab == 0 {
+            return 0;
+        }
+        let bank = self.selected_tab as u32;
+        let row = self.table_state.selected().unwrap_or(0) as u32;
+        (bank - 1) * 50 + row + 1
     }
 
     fn queue_channels_for_tab(&mut self) {
@@ -152,10 +215,26 @@ impl App {
         if parts.len() >= 5 && parts[0] == "CIN" {
             if let Ok(idx) = parts[1].parse::<usize>() {
                 if idx > 0 && idx <= 500 {
+                    let mut freq = parts[3].to_string();
+                    if freq.len() == 8 && freq.chars().all(|c| c.is_digit(10)) {
+                        if freq == "00000000" {
+                            freq = "".to_string();
+                        } else {
+                            let mhz = freq[0..4].trim_start_matches('0');
+                            let mhz = if mhz.is_empty() { "0" } else { mhz };
+                            let khz = freq[4..8].trim_end_matches('0');
+                            if khz.is_empty() {
+                                freq = format!("{}.0", mhz);
+                            } else {
+                                freq = format!("{}.{}", mhz, khz);
+                            }
+                        }
+                    }
+
                     self.channels[idx] = Some(Channel {
                         index: idx as u32,
                         name: parts[2].to_string(),
-                        frequency: parts[3].to_string(),
+                        frequency: freq,
                         modulation: parts[4].to_string(),
                     });
                     return true;
@@ -247,6 +326,32 @@ fn send_command(port: &mut Box<dyn SerialPort>, cmd: &str) -> String {
         }
     }
     response.trim().to_string()
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(popup_layout[1])[1]
 }
 
 pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -417,8 +522,10 @@ Channel:   {}",
                     ]
                 )
                 .header(Row::new(vec!["Idx", "Name", "Freq", "Mod"]).style(Style::default().add_modifier(Modifier::BOLD)))
-                .block(Block::default().borders(Borders::ALL).title(format!("Bank {}", bank)));
-                f.render_widget(table, chunks[1]);
+                .block(Block::default().borders(Borders::ALL).title(format!("Bank {}", bank)))
+                .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+                .highlight_symbol(">> ");
+                f.render_stateful_widget(table, chunks[1], &mut app.table_state);
             }
 
             let mode_str = if app.in_prg_mode { "Remote (PRG)" } else { "Monitor" };
@@ -435,12 +542,68 @@ Channel:   {}",
             let help_keys = if app.selected_tab == 0 {
                 "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, '1-0': Toggle Banks, 'q': Quit."
             } else {
-                "Use Left/Right to switch tabs. 'q': Quit."
+                "Use Left/Right to switch tabs. Up/Down or j/k to navigate. 'e': Edit, 'd': Delete, 'q': Quit."
             };
 
             let help_text = Paragraph::new(format!("{}\nStatus: {}", help_keys, status_msg))
                 .block(Block::default().title("Help").borders(Borders::ALL));
              f.render_widget(help_text, chunks[2]);
+
+            if app.input_mode == InputMode::ConfirmDelete {
+                let area = centered_rect(60, 20, f.area());
+                f.render_widget(Clear, area);
+                let idx = app.selected_channel_index();
+                let text = format!("\n  Are you sure you want to delete channel {}?\n\n  (y) Yes / (n) No", idx);
+                let block = Block::default().title("Confirm Delete").borders(Borders::ALL).style(Style::default().fg(Color::Red));
+                let paragraph = Paragraph::new(text).block(block);
+                f.render_widget(paragraph, area);
+            }
+
+            if let InputMode::Editing(edit_state) = &app.input_mode {
+                let area = centered_rect(60, 40, f.area());
+                f.render_widget(Clear, area);
+
+                let block = Block::default().title("Edit Channel").borders(Borders::ALL);
+                f.render_widget(block, area);
+
+                let inner_area = Layout::default()
+                    .direction(Direction::Vertical)
+                    .margin(2)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Length(3),
+                        Constraint::Min(0),
+                    ])
+                    .split(area);
+
+                let freq_style = if edit_state.active_field == EditField::Frequency {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                let name_style = if edit_state.active_field == EditField::Name {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+
+                let (freq_text, freq_display_style) = if edit_state.frequency.is_empty() {
+                    ("118.100", Style::default().fg(Color::DarkGray))
+                } else {
+                    (edit_state.frequency.as_str(), freq_style)
+                };
+
+                let freq_input = Paragraph::new(freq_text)
+                    .block(Block::default().title("Frequency (MHz)").borders(Borders::ALL).style(freq_display_style));
+                f.render_widget(freq_input, inner_area[0]);
+
+                let name_input = Paragraph::new(edit_state.name.as_str())
+                    .block(Block::default().title("Name").borders(Borders::ALL).style(name_style));
+                f.render_widget(name_input, inner_area[1]);
+
+                let help = Paragraph::new("Tab: Switch Field | Enter: Save | Esc: Cancel");
+                f.render_widget(help, inner_area[2]);
+            }
         })?;
 
         // Poll for input
@@ -452,32 +615,154 @@ Channel:   {}",
 
         if event::poll(poll_timeout)? {
             if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Right => app.next_tab(),
-                    KeyCode::Left => app.previous_tab(),
-                    KeyCode::Char('s') if app.selected_tab == 0 => {
-                         let _ = send_command(&mut port, "KEY,S,P");
-                    },
-                    KeyCode::Char('h') if app.selected_tab == 0 => {
-                         let _ = send_command(&mut port, "KEY,H,P");
-                    },
-                    KeyCode::Char(c) if app.selected_tab == 0 && c.is_digit(10) => {
-                        if let Some(digit) = c.to_digit(10) {
-                            // 1->0, 2->1, ... 0->9
-                            let bank_idx = if digit == 0 { 9 } else { digit - 1 } as usize;
-                            if bank_idx < 10 {
-                                app.banks[bank_idx] = !app.banks[bank_idx];
-                                let scg_cmd = app.get_scg_string();
-                                // Apply change
-                                let _ = send_command(&mut port, "PRG");
-                                let _ = send_command(&mut port, &scg_cmd);
-                                let _ = send_command(&mut port, "EPG");
-                                let _ = send_command(&mut port, "KEY,S,P");
+                let idx = app.selected_channel_index();
+                match app.input_mode {
+                    InputMode::Normal => match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Right => app.next_tab(),
+                        KeyCode::Left => app.previous_tab(),
+                        KeyCode::Down | KeyCode::Char('j') if app.selected_tab > 0 => {
+                            app.next_channel();
+                        }
+                        KeyCode::Up | KeyCode::Char('k') if app.selected_tab > 0 => {
+                            app.previous_channel();
+                        }
+                        KeyCode::Char('d') if app.selected_tab > 0 => {
+                            app.input_mode = InputMode::ConfirmDelete;
+                        }
+                        KeyCode::Char('e') | KeyCode::Enter if app.selected_tab > 0 => {
+                            let (freq, name) = if let Some(chan) = &app.channels[idx as usize] {
+                                (chan.frequency.clone(), chan.name.clone())
+                            } else {
+                                ("".to_string(), "".to_string())
+                            };
+                            app.input_mode = InputMode::Editing(EditState {
+                                frequency: freq,
+                                name: name,
+                                active_field: EditField::Frequency,
+                            });
+                        }
+                        KeyCode::Char('s') if app.selected_tab == 0 => {
+                            let _ = send_command(&mut port, "KEY,S,P");
+                        }
+                        KeyCode::Char('h') if app.selected_tab == 0 => {
+                            let _ = send_command(&mut port, "KEY,H,P");
+                        }
+                        KeyCode::Char(c) if app.selected_tab == 0 && c.is_digit(10) => {
+                            if let Some(digit) = c.to_digit(10) {
+                                // 1->0, 2->1, ... 0->9
+                                let bank_idx = if digit == 0 { 9 } else { digit - 1 } as usize;
+                                if bank_idx < 10 {
+                                    app.banks[bank_idx] = !app.banks[bank_idx];
+                                    let scg_cmd = app.get_scg_string();
+                                    // Apply change
+                                    let _ = send_command(&mut port, "PRG");
+                                    let _ = send_command(&mut port, &scg_cmd);
+                                    let _ = send_command(&mut port, "EPG");
+                                    let _ = send_command(&mut port, "KEY,S,P");
+                                }
                             }
                         }
-                    }
-                    _ => {}
+                        _ => {}
+                    },
+                    InputMode::ConfirmDelete => match key.code {
+                        KeyCode::Char('y') => {
+                            let cmd = format!("DCH,{}", idx);
+                            let _ = send_command(&mut port, &cmd);
+                            app.channels[idx as usize] = None;
+                            app.fetch_queue.push_back(idx);
+                            app.input_mode = InputMode::Normal;
+                        }
+                        KeyCode::Char('n') | KeyCode::Esc => {
+                            app.input_mode = InputMode::Normal;
+                        }
+                        _ => {}
+                    },
+                    InputMode::Editing(ref mut edit_state) => match key.code {
+                        KeyCode::Esc => {
+                            app.input_mode = InputMode::Normal;
+                        }
+                        KeyCode::Tab => {
+                            edit_state.active_field = match edit_state.active_field {
+                                EditField::Frequency => EditField::Name,
+                                EditField::Name => EditField::Frequency,
+                            };
+                        }
+                        KeyCode::Char(c) => match edit_state.active_field {
+                            EditField::Frequency => edit_state.frequency.push(c),
+                            EditField::Name => edit_state.name.push(c),
+                        },
+                        KeyCode::Backspace => match edit_state.active_field {
+                            EditField::Frequency => {
+                                edit_state.frequency.pop();
+                            }
+                            EditField::Name => {
+                                edit_state.name.pop();
+                            }
+                        },
+                        KeyCode::Enter => {
+                            let raw_freq = if edit_state.frequency.contains('.') {
+                                let parts: Vec<&str> = edit_state.frequency.split('.').collect();
+                                let mut mhz = parts[0].to_string();
+                                let mut khz = if parts.len() > 1 {
+                                    parts[1].to_string()
+                                } else {
+                                    "".to_string()
+                                };
+
+                                // Pad MHz to 4 digits with leading zeros
+                                while mhz.len() < 4 {
+                                    mhz.insert(0, '0');
+                                }
+                                if mhz.len() > 4 {
+                                    mhz.truncate(4);
+                                }
+
+                                // Pad KHz to 4 digits with trailing zeros
+                                while khz.len() < 4 {
+                                    khz.push('0');
+                                }
+                                if khz.len() > 4 {
+                                    khz.truncate(4);
+                                }
+                                format!("{}{}", mhz, khz)
+                            } else if edit_state.frequency.len() >= 7 {
+                                // Assume raw format if long and no dot
+                                let mut f = edit_state.frequency.clone();
+                                while f.len() < 8 {
+                                    f.insert(0, '0');
+                                }
+                                if f.len() > 8 {
+                                    f.truncate(8);
+                                }
+                                f
+                            } else if !edit_state.frequency.is_empty() {
+                                // Short input without dot, assume MHz
+                                let mut mhz = edit_state.frequency.clone();
+                                while mhz.len() < 4 {
+                                    mhz.insert(0, '0');
+                                }
+                                format!("{}0000", mhz)
+                            } else {
+                                "".to_string()
+                            };
+
+                            let cmd =
+                                format!("CIN,{},{},{},AM,0,0,0,0", idx, edit_state.name, raw_freq);
+                            let _ = send_command(&mut port, &cmd);
+
+                            // Update local state
+                            app.channels[idx as usize] = Some(Channel {
+                                index: idx,
+                                name: edit_state.name.clone(),
+                                frequency: edit_state.frequency.clone(),
+                                modulation: "AM".to_string(),
+                            });
+
+                            app.input_mode = InputMode::Normal;
+                        }
+                        _ => {}
+                    },
                 }
             }
         }
@@ -512,6 +797,8 @@ mod tests {
             fetch_queue: VecDeque::new(),
             in_prg_mode: false,
             banks: vec![true; 10],
+            input_mode: InputMode::Normal,
+            table_state: TableState::default(),
         };
 
         // Example from SCANNER-COMMANDS.md: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
@@ -536,6 +823,8 @@ mod tests {
             fetch_queue: VecDeque::new(),
             in_prg_mode: false,
             banks: vec![true; 10],
+            input_mode: InputMode::Normal,
+            table_state: TableState::default(),
         };
 
         // Test with a frequency < 100MHz (padding check)
@@ -560,6 +849,8 @@ mod tests {
             fetch_queue: VecDeque::new(),
             in_prg_mode: false,
             banks: vec![true; 10],
+            input_mode: InputMode::Normal,
+            table_state: TableState::default(),
         };
 
         // Case 1: Signal Detected (Index 8 = 1)

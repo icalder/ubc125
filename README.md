@@ -3,13 +3,16 @@
 ## Quick build, deploy and test
 
 ```sh
+# Build for x86
+nix build .#ubc125
+
 # Build the package for AArch64
-nix build .#packages.aarch64-linux.ubc125
-ssh # to get store path
+nix build .#ubc125-aarch64
+readlink -f ./result # to get store path
 
 # Push the result to the Pi and run it
 nix-copy-closure --to itcalde@alarmpi ./result
-/nix/store/2x8lqzkr2m8srwwcifak3yv0pjcs3ad0-ubc125-0.1.0/bin/ubc125 console
+/nix/store/zhrs4vfqph0vikr4v93g2z3psy4xqp1j-ubc125-aarch64-unknown-linux-gnu-0.2.0/bin/ubc125 console
 ```
 
 ## Minicom
