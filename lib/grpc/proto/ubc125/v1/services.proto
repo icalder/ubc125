@@ -7,18 +7,90 @@ service SystemInfoService {
   rpc GetFirmwareVersion (GetFirmwareVersionRequest) returns (GetFirmwareVersionResponse);
 }
 
-message GetModelInfoRequest {
-  // No fields required for this request
+service ScannerControlService {
+  rpc GetAudioSettings (GetAudioSettingsRequest) returns (GetAudioSettingsResponse);
+  rpc StartScan (StartScanRequest) returns (StartScanResponse);
+  rpc HoldScan (HoldScanRequest) returns (HoldScanResponse);
+  rpc GetEnabledBanks (GetEnabledBanksRequest) returns (GetEnabledBanksResponse);
+  rpc SetEnabledBanks (SetEnabledBanksRequest) returns (SetEnabledBanksResponse);
+  rpc GetStatus (GetStatusRequest) returns (stream GetStatusResponse);
+  rpc GetChannel (GetChannelRequest) returns (GetChannelResponse);
+  rpc SetChannel (SetChannelRequest) returns (SetChannelResponse);
+  rpc DeleteChannel (DeleteChannelRequest) returns (DeleteChannelResponse);
 }
+
+message GetModelInfoRequest {}
 
 message GetModelInfoResponse {
   string result = 1;
 }
 
-message GetFirmwareVersionRequest {
-  // No fields required for this request
-}
+message GetFirmwareVersionRequest {}
 
 message GetFirmwareVersionResponse {
   string result = 1;
 }
+
+message GetAudioSettingsRequest {}
+
+message GetAudioSettingsResponse {
+  string volume = 1;
+  string squelch = 2;
+}
+
+message StartScanRequest {}
+
+message StartScanResponse {}
+
+message HoldScanRequest {}
+
+message HoldScanResponse {}
+
+message GetEnabledBanksRequest {}
+
+message GetEnabledBanksResponse {
+  repeated bool banks = 1;
+}
+
+message SetEnabledBanksRequest {
+  repeated bool banks = 1;
+}
+
+message SetEnabledBanksResponse {}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  string frequency = 1;
+  string bank = 2;
+  string channel_name = 3;
+  bool signal_detected = 4;
+  string raw_response = 5;
+}
+
+message Channel {
+  uint32 index = 1;
+  string name = 2;
+  string frequency = 3;
+  string modulation = 4;
+}
+
+message GetChannelRequest {
+  uint32 index = 1;
+}
+
+message GetChannelResponse {
+  Channel channel = 1;
+}
+
+message SetChannelRequest {
+  Channel channel = 1;
+}
+
+message SetChannelResponse {}
+
+message DeleteChannelRequest {
+  uint32 index = 1;
+}
+
+message DeleteChannelResponse {}
