@@ -1,5 +1,7 @@
 mod cmd;
+mod scanner;
 mod server;
+
 
 use cmd::cli::Commands;
 use cmd::prelude::*;

@@ -1605,6 +1605,7 @@ dependencies = [
  "ratatui",
  "serialport",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-reflection",
  "tonic-web",

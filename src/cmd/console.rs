@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{self, Write};
+use std::io;
 use std::time::{Duration, Instant};
 
 use clap::Args;
@@ -16,7 +16,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Tabs},
     Terminal,
 };
-use serialport::SerialPort;
+use crate::scanner::ScannerClient;
 
 #[derive(Args)]
 pub struct ConsoleArgs {
@@ -38,6 +38,7 @@ enum InputMode {
     Normal,
     Editing(EditState),
     ConfirmDelete,
+    SetSquelch,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -79,6 +80,7 @@ struct App {
     version: String,
     volume: String,
     squelch: String,
+    squelch_input: String,
     scan_status: ScanStatus,
     // Tab state
     tabs: Vec<String>,
@@ -93,23 +95,23 @@ struct App {
 }
 
 impl App {
-    fn new(port: &mut Box<dyn SerialPort>) -> Self {
+    fn new(client: &mut ScannerClient) -> Self {
         let mut tabs = vec!["Monitor".to_string()];
         for i in 1..=10 {
             tabs.push(format!("Bank {}", i));
         }
 
-        let model = send_command(port, "MDL");
-        let version = send_command(port, "VER");
-        let volume = send_command(port, "VOL");
-        let squelch = send_command(port, "SQL");
+        let model = client.send_command("MDL").unwrap_or_else(|e| format!("Err: {}", e));
+        let version = client.send_command("VER").unwrap_or_else(|e| format!("Err: {}", e));
+        let volume = client.get_volume().unwrap_or_else(|e| format!("Err: {}", e));
+        let squelch = client.get_squelch().unwrap_or_else(|e| format!("Err: {}", e));
 
         // Fetch initial bank status
         // Enter PRG mode temporarily
-        let _ = send_command(port, "PRG");
-        let scg_resp = send_command(port, "SCG");
-        let _ = send_command(port, "EPG");
-        let _ = send_command(port, "KEY,S,P");
+        let _ = client.send_command("PRG");
+        let scg_resp = client.send_command("SCG").unwrap_or_default();
+        let _ = client.send_command("EPG");
+        let _ = client.send_command("KEY,S,P");
 
         // Parse SCG: SCG,0101010101 (0=On, 1=Off)
         let mut banks = vec![true; 10]; // Default all on if parse fails
@@ -128,6 +130,7 @@ impl App {
             version,
             volume,
             squelch,
+            squelch_input: String::new(),
             scan_status: ScanStatus::default(),
             tabs,
             selected_tab: 0,
@@ -293,40 +296,7 @@ impl App {
     }
 }
 
-fn send_command(port: &mut Box<dyn SerialPort>, cmd: &str) -> String {
-    let mut command = String::from(cmd);
-    command.push('\r');
-    if let Err(e) = port.write_all(command.as_bytes()) {
-        return format!("Write Error: {}", e);
-    }
-    
-    let mut response = String::new();
-    let mut buf = [0u8; 1];
-    let start = Instant::now();
-    let timeout = Duration::from_millis(500);
 
-    loop {
-        if start.elapsed() > timeout {
-             break;
-        }
-        match port.read(&mut buf) {
-            Ok(n) if n > 0 => {
-                let c = buf[0] as char;
-                if c == '\r' {
-                    break;
-                }
-                // Ignore newlines if they appear before \r (unlikely) or just append
-                if c != '\n' {
-                    response.push(c);
-                }
-            }
-            Ok(_) => {},
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {},
-            Err(e) => return format!("Read Error: {}", e),
-        }
-    }
-    response.trim().to_string()
-}
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
@@ -355,15 +325,10 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
-    // Setup serial port
-    let mut port = serialport::new(&args.console_device, 115_200)
-        .timeout(Duration::from_millis(100))
-        .open()?;
+    // Setup serial port via ScannerClient
+    let mut client = ScannerClient::new(&args.console_device)?;
 
-    // Clear any pending input
-    let _ = port.clear(serialport::ClearBuffer::All);
-
-    let mut app = App::new(&mut port);
+    let mut app = App::new(&mut client);
 
     // Setup terminal
     enable_raw_mode()?;
@@ -378,12 +343,12 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         // Mode Management
         if app.selected_tab > 0 && !app.in_prg_mode {
-            let _ = send_command(&mut port, "PRG");
+            let _ = client.send_command("PRG");
             app.in_prg_mode = true;
         } else if app.selected_tab == 0 && app.in_prg_mode {
-            let _ = send_command(&mut port, "EPG");
+            let _ = client.send_command("EPG");
             // Automatically resume scanning when returning to Monitor
-            let _ = send_command(&mut port, "KEY,S,P");
+            let _ = client.send_command("KEY,S,P");
             app.in_prg_mode = false;
             app.fetch_queue.clear();
         }
@@ -391,7 +356,7 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
         // Fetch Logic
         if app.in_prg_mode {
             if let Some(idx) = app.fetch_queue.pop_front() {
-                let resp = send_command(&mut port, &format!("CIN,{}", idx));
+                let resp = client.send_command(&format!("CIN,{}", idx)).unwrap_or_else(|e| format!("Err: {}", e));
                 if !app.update_channel(resp) {
                      // Retry if failed (push to back)
                      app.fetch_queue.push_back(idx);
@@ -400,7 +365,7 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             // Poll scanner status only in Monitor mode
             if app.selected_tab == 0 && last_poll.elapsed() >= Duration::from_millis(250) {
-                let resp = send_command(&mut port, "GLG");
+                let resp = client.send_command("GLG").unwrap_or_else(|e| format!("Err: {}", e));
                 app.update_scan_status(resp);
                 last_poll = Instant::now();
             }
@@ -540,7 +505,7 @@ Channel:   {}",
             };
 
             let help_keys = if app.selected_tab == 0 {
-                "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, '1-0': Toggle Banks, 'q': Quit."
+                "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, 'l': Set Squelch, '1-0': Toggle Banks, 'q': Quit."
             } else {
                 "Use Left/Right to switch tabs. Up/Down or j/k to navigate. 'e': Edit, 'd': Delete, 'q': Quit."
             };
@@ -555,6 +520,15 @@ Channel:   {}",
                 let idx = app.selected_channel_index();
                 let text = format!("\n  Are you sure you want to delete channel {}?\n\n  (y) Yes / (n) No", idx);
                 let block = Block::default().title("Confirm Delete").borders(Borders::ALL).style(Style::default().fg(Color::Red));
+                let paragraph = Paragraph::new(text).block(block);
+                f.render_widget(paragraph, area);
+            }
+
+            if app.input_mode == InputMode::SetSquelch {
+                let area = centered_rect(40, 20, f.area());
+                f.render_widget(Clear, area);
+                let text = format!("\n  Enter Squelch Level (0-15): {}", app.squelch_input);
+                let block = Block::default().title("Set Squelch").borders(Borders::ALL).style(Style::default().fg(Color::Yellow));
                 let paragraph = Paragraph::new(text).block(block);
                 f.render_widget(paragraph, area);
             }
@@ -643,10 +617,14 @@ Channel:   {}",
                             });
                         }
                         KeyCode::Char('s') if app.selected_tab == 0 => {
-                            let _ = send_command(&mut port, "KEY,S,P");
+                            let _ = client.send_command("KEY,S,P");
+                        }
+                        KeyCode::Char('l') if app.selected_tab == 0 => {
+                            app.squelch_input.clear();
+                            app.input_mode = InputMode::SetSquelch;
                         }
                         KeyCode::Char('h') if app.selected_tab == 0 => {
-                            let _ = send_command(&mut port, "KEY,H,P");
+                            let _ = client.send_command("KEY,H,P");
                         }
                         KeyCode::Char(c) if app.selected_tab == 0 && c.is_digit(10) => {
                             if let Some(digit) = c.to_digit(10) {
@@ -656,10 +634,10 @@ Channel:   {}",
                                     app.banks[bank_idx] = !app.banks[bank_idx];
                                     let scg_cmd = app.get_scg_string();
                                     // Apply change
-                                    let _ = send_command(&mut port, "PRG");
-                                    let _ = send_command(&mut port, &scg_cmd);
-                                    let _ = send_command(&mut port, "EPG");
-                                    let _ = send_command(&mut port, "KEY,S,P");
+                                    let _ = client.send_command("PRG");
+                                    let _ = client.send_command(&scg_cmd);
+                                    let _ = client.send_command("EPG");
+                                    let _ = client.send_command("KEY,S,P");
                                 }
                             }
                         }
@@ -668,12 +646,36 @@ Channel:   {}",
                     InputMode::ConfirmDelete => match key.code {
                         KeyCode::Char('y') => {
                             let cmd = format!("DCH,{}", idx);
-                            let _ = send_command(&mut port, &cmd);
+                            let _ = client.send_command(&cmd);
                             app.channels[idx as usize] = None;
                             app.fetch_queue.push_back(idx);
                             app.input_mode = InputMode::Normal;
                         }
                         KeyCode::Char('n') | KeyCode::Esc => {
+                            app.input_mode = InputMode::Normal;
+                        }
+                        _ => {}
+                    },
+                    InputMode::SetSquelch => match key.code {
+                        KeyCode::Char(c) if c.is_digit(10) => {
+                            if app.squelch_input.len() < 2 {
+                                app.squelch_input.push(c);
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            app.squelch_input.pop();
+                        }
+                        KeyCode::Enter => {
+                            if let Ok(lvl) = app.squelch_input.parse::<u8>() {
+                                if lvl <= 15 {
+                                    if client.set_squelch(lvl).is_ok() {
+                                        app.squelch = format!("SQL,{}", lvl);
+                                    }
+                                }
+                            }
+                            app.input_mode = InputMode::Normal;
+                        }
+                        KeyCode::Esc => {
                             app.input_mode = InputMode::Normal;
                         }
                         _ => {}
@@ -749,7 +751,7 @@ Channel:   {}",
 
                             let cmd =
                                 format!("CIN,{},{},{},AM,0,0,0,0", idx, edit_state.name, raw_freq);
-                            let _ = send_command(&mut port, &cmd);
+                            let _ = client.send_command(&cmd);
 
                             // Update local state
                             app.channels[idx as usize] = Some(Channel {
@@ -790,6 +792,7 @@ mod tests {
             version: "".into(),
             volume: "".into(),
             squelch: "".into(),
+            squelch_input: "".into(),
             scan_status: ScanStatus::default(),
             tabs: vec![],
             selected_tab: 0,
@@ -816,6 +819,7 @@ mod tests {
             version: "".into(),
             volume: "".into(),
             squelch: "".into(),
+            squelch_input: "".into(),
             scan_status: ScanStatus::default(),
             tabs: vec![],
             selected_tab: 0,
@@ -842,6 +846,7 @@ mod tests {
             version: "".into(),
             volume: "".into(),
             squelch: "".into(),
+            squelch_input: "".into(),
             scan_status: ScanStatus::default(),
             tabs: vec![],
             selected_tab: 0,

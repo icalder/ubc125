@@ -1,12 +1,17 @@
 use clap::Args;
-
+use std::sync::{Arc, Mutex};
 use crate::server;
+use crate::scanner::ScannerClient;
 use tower_http::cors::{Any, CorsLayer};
+use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoServiceServer;
+use ubc125_grpc::ubc125::v1::scanner_control_service_server::ScannerControlServiceServer;
 
 #[derive(Args)]
 pub struct ServeArgs {
     #[arg(short, long, default_value_t = String::from("127.0.0.1:50051"))]
     pub server_addr: String,
+    #[arg(short, long, default_value_t = String::from("/dev/ttyACM0"))]
+    pub device: String,
 }
 
 // grpcurl -plaintext localhost:50051 ubc125.v1.SystemInfoService/GetModelInfo
@@ -17,7 +22,10 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         .register_encoded_file_descriptor_set(ubc125_grpc::ubc125::v1::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
-    let system_info_service = server::SystemInfoServiceImpl {};
+    let client = ScannerClient::new(&args.device)?;
+    let scanner_server = server::ScannerServer {
+        client: Arc::new(Mutex::new(client)),
+    };
 
     println!("Starting server at {}", args.server_addr);
     tonic::transport::Server::builder()
@@ -31,9 +39,10 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         .layer(tonic_web::GrpcWebLayer::new())
         .add_service(reflection_service)
         .add_service(
-            ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoServiceServer::new(
-                system_info_service,
-            ),
+            SystemInfoServiceServer::new(scanner_server.clone()),
+        )
+        .add_service(
+            ScannerControlServiceServer::new(scanner_server),
         )
         .serve(args.server_addr.parse()?)
         .await?;
