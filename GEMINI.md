@@ -28,9 +28,13 @@ Code for the console mode is in [cli.rs](./src/cmd/cli.rs).
 
 ## Serve Mode
 
-TODO, this will expose a gRPC interface to the scanner for remote control.
+TODO, this will expose a gRPC interface to the scanner for remote control.  The gRPC service is defined in [services.proto](./lib/grpc/proto/ubc125/v1/services.proto).
 
-Code for the serve mode is in [serve.rs](./src/cmd/serve.rs).
+Code for the serve mode is in [serve.rs](./src/cmd/serve.rs).  The gRPC handler methods are defined in [server.rs](./src/server.rs).  Some are stubbed pending full implementation.
+
+## Architecture
+
+`ScannerClient` in [scanner.rs](./src/scanner.rs) will contain all code for serial port communications with the scanner.  It is used by both the console and gRPC server.  
 
 ## Documentation
 
