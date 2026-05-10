@@ -24,7 +24,7 @@ The scanner has lots of features but we are only interested in the core scanning
 
 The aim here is to have a [Ratatui](https://ratatui.rs/) console interface mimicking the display and button panel of the actual scanner, with some extra screens for easy management of frequency banks.
 
-Code for the console mode is in [cli.rs](./src/cmd/cli.rs).
+Code for the console mode is in [console.rs](./src/cmd/console.rs).
 
 ## Serve Mode
 
