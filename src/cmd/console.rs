@@ -38,7 +38,30 @@ enum InputMode {
     Normal,
     Editing(EditState),
     ConfirmDelete,
-    SetSquelch,
+    SetLevel(LevelKind),
+}
+
+/// Which 0-15 level dialog is active
+#[derive(Clone, Copy, PartialEq)]
+enum LevelKind {
+    Squelch,
+    Volume,
+}
+
+impl LevelKind {
+    fn title(&self) -> &'static str {
+        match self {
+            LevelKind::Squelch => "Squelch",
+            LevelKind::Volume => "Volume",
+        }
+    }
+
+    fn response_prefix(&self) -> &'static str {
+        match self {
+            LevelKind::Squelch => "SQL",
+            LevelKind::Volume => "VOL",
+        }
+    }
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -80,7 +103,7 @@ struct App {
     version: String,
     volume: String,
     squelch: String,
-    squelch_input: String,
+    level_input: String, // shared input buffer for volume/squelch dialogs
     scan_status: ScanStatus,
     // Tab state
     tabs: Vec<String>,
@@ -130,7 +153,7 @@ impl App {
             version,
             volume,
             squelch,
-            squelch_input: String::new(),
+            level_input: String::new(),
             scan_status: ScanStatus::default(),
             tabs,
             selected_tab: 0,
@@ -410,8 +433,8 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                 let info_text = format!(
                     "Model:   {}
 Version: {}
-Volume:  {}
-Squelch: {}",
+Volume:  {}  [v]: Set
+Squelch: {}  [l]: Set",
                     app.model, app.version, app.volume, app.squelch
                 );
                 let info_paragraph = Paragraph::new(info_text)
@@ -505,7 +528,7 @@ Channel:   {}",
             };
 
             let help_keys = if app.selected_tab == 0 {
-                "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, 'l': Set Squelch, '1-0': Toggle Banks, 'q': Quit."
+                "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, '1-0': Toggle Banks, 'q': Quit."
             } else {
                 "Use Left/Right to switch tabs. Up/Down or j/k to navigate. 'e': Edit, 'd': Delete, 'q': Quit."
             };
@@ -524,11 +547,14 @@ Channel:   {}",
                 f.render_widget(paragraph, area);
             }
 
-            if app.input_mode == InputMode::SetSquelch {
+            if let InputMode::SetLevel(kind) = &app.input_mode {
                 let area = centered_rect(40, 20, f.area());
                 f.render_widget(Clear, area);
-                let text = format!("\n  Enter Squelch Level (0-15): {}", app.squelch_input);
-                let block = Block::default().title("Set Squelch").borders(Borders::ALL).style(Style::default().fg(Color::Yellow));
+                let text = format!("\n  Enter {} Level (0-15): {}", kind.title(), app.level_input);
+                let block = Block::default()
+                    .title(format!("Set {}", kind.title()))
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::Yellow));
                 let paragraph = Paragraph::new(text).block(block);
                 f.render_widget(paragraph, area);
             }
@@ -620,8 +646,12 @@ Channel:   {}",
                             let _ = client.send_command("KEY,S,P");
                         }
                         KeyCode::Char('l') if app.selected_tab == 0 => {
-                            app.squelch_input.clear();
-                            app.input_mode = InputMode::SetSquelch;
+                            app.level_input.clear();
+                            app.input_mode = InputMode::SetLevel(LevelKind::Squelch);
+                        }
+                        KeyCode::Char('v') if app.selected_tab == 0 => {
+                            app.level_input.clear();
+                            app.input_mode = InputMode::SetLevel(LevelKind::Volume);
                         }
                         KeyCode::Char('h') if app.selected_tab == 0 => {
                             let _ = client.send_command("KEY,H,P");
@@ -656,20 +686,28 @@ Channel:   {}",
                         }
                         _ => {}
                     },
-                    InputMode::SetSquelch => match key.code {
+                    InputMode::SetLevel(kind) => match key.code {
                         KeyCode::Char(c) if c.is_digit(10) => {
-                            if app.squelch_input.len() < 2 {
-                                app.squelch_input.push(c);
+                            if app.level_input.len() < 2 {
+                                app.level_input.push(c);
                             }
                         }
                         KeyCode::Backspace => {
-                            app.squelch_input.pop();
+                            app.level_input.pop();
                         }
                         KeyCode::Enter => {
-                            if let Ok(lvl) = app.squelch_input.parse::<u8>() {
+                            if let Ok(lvl) = app.level_input.parse::<u8>() {
                                 if lvl <= 15 {
-                                    if client.set_squelch(lvl).is_ok() {
-                                        app.squelch = format!("SQL,{}", lvl);
+                                    let ok = match kind {
+                                        LevelKind::Squelch => client.set_squelch(lvl).is_ok(),
+                                        LevelKind::Volume => client.set_volume(lvl).is_ok(),
+                                    };
+                                    if ok {
+                                        let prefix = kind.response_prefix();
+                                        match kind {
+                                            LevelKind::Squelch => app.squelch = format!("{},{}", prefix, lvl),
+                                            LevelKind::Volume => app.volume = format!("{},{}", prefix, lvl),
+                                        }
                                     }
                                 }
                             }
@@ -792,7 +830,7 @@ mod tests {
             version: "".into(),
             volume: "".into(),
             squelch: "".into(),
-            squelch_input: "".into(),
+            level_input: "".into(),
             scan_status: ScanStatus::default(),
             tabs: vec![],
             selected_tab: 0,
@@ -819,7 +857,7 @@ mod tests {
             version: "".into(),
             volume: "".into(),
             squelch: "".into(),
-            squelch_input: "".into(),
+            level_input: "".into(),
             scan_status: ScanStatus::default(),
             tabs: vec![],
             selected_tab: 0,
@@ -846,7 +884,7 @@ mod tests {
             version: "".into(),
             volume: "".into(),
             squelch: "".into(),
-            squelch_input: "".into(),
+            level_input: "".into(),
             scan_status: ScanStatus::default(),
             tabs: vec![],
             selected_tab: 0,
