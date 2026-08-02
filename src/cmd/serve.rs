@@ -1,10 +1,10 @@
+use crate::scanner::ScannerClient;
+use crate::server;
 use clap::Args;
 use std::sync::{Arc, Mutex};
-use crate::server;
-use crate::scanner::ScannerClient;
 use tower_http::cors::{Any, CorsLayer};
-use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoServiceServer;
 use ubc125_grpc::ubc125::v1::scanner_control_service_server::ScannerControlServiceServer;
+use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoServiceServer;
 
 #[derive(Args)]
 pub struct ServeArgs {
@@ -27,7 +27,7 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         client: Arc::new(Mutex::new(client)),
     };
 
-    println!("Starting server at {}", args.server_addr);
+    tracing::info!("Starting server at {}", args.server_addr);
     tonic::transport::Server::builder()
         .accept_http1(true)
         .layer(
@@ -38,12 +38,8 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         )
         .layer(tonic_web::GrpcWebLayer::new())
         .add_service(reflection_service)
-        .add_service(
-            SystemInfoServiceServer::new(scanner_server.clone()),
-        )
-        .add_service(
-            ScannerControlServiceServer::new(scanner_server),
-        )
+        .add_service(SystemInfoServiceServer::new(scanner_server.clone()))
+        .add_service(ScannerControlServiceServer::new(scanner_server))
         .serve(args.server_addr.parse()?)
         .await?;
 

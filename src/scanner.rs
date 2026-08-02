@@ -1,6 +1,8 @@
+use serialport::SerialPort;
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
-use serialport::SerialPort;
+
+use crate::constants::{MAX_LEVEL, PORT_TIMEOUT_MS, READ_TIMEOUT_MS};
 
 pub struct ScannerClient {
     port: Box<dyn SerialPort>,
@@ -9,9 +11,9 @@ pub struct ScannerClient {
 impl ScannerClient {
     pub fn new(device_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let port = serialport::new(device_path, 115_200)
-            .timeout(Duration::from_millis(100))
+            .timeout(Duration::from_millis(PORT_TIMEOUT_MS))
             .open()?;
-        
+
         // Clear buffer
         let _ = port.clear(serialport::ClearBuffer::All);
 
@@ -22,16 +24,15 @@ impl ScannerClient {
         let mut command = String::from(cmd);
         command.push('\r');
         self.port.write_all(command.as_bytes())?;
-        
+
         let mut response = String::new();
         let mut buf = [0u8; 1];
         let start = Instant::now();
-        let timeout = Duration::from_millis(500); // Same timeout as console.rs
+        let timeout = Duration::from_millis(READ_TIMEOUT_MS);
 
         loop {
             if start.elapsed() > timeout {
-                // In console.rs it breaks, here maybe we should too, or return error?
-                // console.rs returns what it has.
+                // Timeout: return whatever has been accumulated so far.
                 break;
             }
             match self.port.read(&mut buf) {
@@ -44,8 +45,8 @@ impl ScannerClient {
                         response.push(c);
                     }
                 }
-                Ok(_) => {},
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {},
+                Ok(_) => {}
+                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {}
                 Err(e) => return Err(e),
             }
         }
@@ -56,9 +57,8 @@ impl ScannerClient {
         self.send_command("VOL")
     }
 
-    #[allow(dead_code)]
     pub fn set_volume(&mut self, level: u8) -> Result<String, io::Error> {
-        if level > 15 {
+        if level > MAX_LEVEL {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Volume level must be between 0 and 15",
@@ -72,7 +72,7 @@ impl ScannerClient {
     }
 
     pub fn set_squelch(&mut self, level: u8) -> Result<String, io::Error> {
-        if level > 15 {
+        if level > MAX_LEVEL {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Squelch level must be between 0 and 15",

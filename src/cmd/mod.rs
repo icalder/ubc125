@@ -1,7 +1,4 @@
 pub mod cli;
 pub mod console;
+mod renderer;
 pub mod serve;
-
-pub mod prelude {
-    pub(crate) use clap::Parser;
-}

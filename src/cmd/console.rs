@@ -4,19 +4,21 @@ use std::time::{Duration, Instant};
 
 use clap::Args;
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyEvent},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style, Color},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Row, Table, TableState, Tabs},
-    Terminal,
+use ratatui::{Terminal, backend::CrosstermBackend, widgets::TableState};
+
+use crate::constants::{
+    CHANNELS_PER_BANK, MAX_CHANNELS, MAX_LEVEL, NUM_BANKS, POLL_INTERVAL_ACTIVE_MS,
+    POLL_INTERVAL_IDLE_MS, POLL_INTERVAL_MS,
 };
+use crate::modes::ModeManager;
 use crate::scanner::ScannerClient;
+use crate::types::{BankMask, Channel, ChannelIndex, Frequency, Modulation, ScanStatus};
+
+use super::renderer;
 
 #[derive(Args)]
 pub struct ConsoleArgs {
@@ -24,16 +26,8 @@ pub struct ConsoleArgs {
     pub console_device: String,
 }
 
-#[derive(Clone, Debug)]
-struct Channel {
-    index: u32,
-    name: String,
-    frequency: String,
-    modulation: String,
-}
-
 #[derive(Default, PartialEq)]
-enum InputMode {
+pub(crate) enum InputMode {
     #[default]
     Normal,
     Editing(EditState),
@@ -43,13 +37,13 @@ enum InputMode {
 
 /// Which 0-15 level dialog is active
 #[derive(Clone, Copy, PartialEq)]
-enum LevelKind {
+pub(crate) enum LevelKind {
     Squelch,
     Volume,
 }
 
 impl LevelKind {
-    fn title(&self) -> &'static str {
+    pub(crate) fn title(&self) -> &'static str {
         match self {
             LevelKind::Squelch => "Squelch",
             LevelKind::Volume => "Volume",
@@ -65,88 +59,69 @@ impl LevelKind {
 }
 
 #[derive(Clone, Default, PartialEq)]
-enum EditField {
+pub(crate) enum EditField {
     #[default]
     Frequency,
     Name,
 }
 
 #[derive(Clone, Default, PartialEq)]
-struct EditState {
-    frequency: String,
-    name: String,
-    active_field: EditField,
+pub(crate) struct EditState {
+    pub(crate) frequency: String,
+    pub(crate) name: String,
+    pub(crate) active_field: EditField,
 }
 
-struct ScanStatus {
-    frequency: String,
-    bank: String,
-    channel_name: String,
-    raw: String,
-    signal_detected: bool,
-}
-
-impl Default for ScanStatus {
-    fn default() -> Self {
-        Self {
-            frequency: "---".to_string(),
-            bank: "-".to_string(),
-            channel_name: "".to_string(),
-            raw: "".to_string(),
-            signal_detected: false,
-        }
-    }
-}
-
-struct App {
-    model: String,
-    version: String,
-    volume: String,
-    squelch: String,
-    level_input: String, // shared input buffer for volume/squelch dialogs
-    scan_status: ScanStatus,
-    // Tab state
-    tabs: Vec<String>,
-    selected_tab: usize,
-    // Channel data (Index 1-500)
-    channels: Vec<Option<Channel>>,
-    fetch_queue: VecDeque<u32>,
-    in_prg_mode: bool,
-    banks: Vec<bool>, // 10 banks (0-9 corresponds to Bank 1-10)
-    input_mode: InputMode,
-    table_state: TableState,
+pub struct App {
+    pub(crate) model: String,
+    pub(crate) version: String,
+    pub(crate) volume: String,
+    pub(crate) squelch: String,
+    pub(crate) level_input: String,
+    pub(crate) scan_status: ScanStatus,
+    pub(crate) tabs: Vec<String>,
+    pub(crate) selected_tab: usize,
+    pub(crate) channels: Vec<Option<Channel>>,
+    pub(crate) fetch_queue: VecDeque<u32>,
+    mode_manager: ModeManager,
+    pub(crate) banks: BankMask,
+    pub(crate) input_mode: InputMode,
+    pub(crate) table_state: TableState,
+    pub(crate) error: Option<String>,
 }
 
 impl App {
     fn new(client: &mut ScannerClient) -> Self {
         let mut tabs = vec!["Monitor".to_string()];
-        for i in 1..=10 {
+        for i in 1..=NUM_BANKS {
             tabs.push(format!("Bank {}", i));
         }
 
-        let model = client.send_command("MDL").unwrap_or_else(|e| format!("Err: {}", e));
-        let version = client.send_command("VER").unwrap_or_else(|e| format!("Err: {}", e));
-        let volume = client.get_volume().unwrap_or_else(|e| format!("Err: {}", e));
-        let squelch = client.get_squelch().unwrap_or_else(|e| format!("Err: {}", e));
+        let model = client
+            .send_command("MDL")
+            .unwrap_or_else(|e| format!("Err: {}", e));
+        let version = client
+            .send_command("VER")
+            .unwrap_or_else(|e| format!("Err: {}", e));
+        let volume = client
+            .get_volume()
+            .unwrap_or_else(|e| format!("Err: {}", e));
+        let squelch = client
+            .get_squelch()
+            .unwrap_or_else(|e| format!("Err: {}", e));
 
-        // Fetch initial bank status
-        // Enter PRG mode temporarily
-        let _ = client.send_command("PRG");
-        let scg_resp = client.send_command("SCG").unwrap_or_default();
-        let _ = client.send_command("EPG");
-        let _ = client.send_command("KEY,S,P");
+        // Fetch initial bank status via ModeManager.
+        // Only query SCG if we successfully entered program mode.
+        let mut mode_mgr = ModeManager::new();
+        let scg_resp = if mode_mgr.ensure_program(client).is_ok() {
+            let resp = client.send_command("SCG").unwrap_or_default();
+            let _ = mode_mgr.ensure_monitor(client);
+            resp
+        } else {
+            String::new()
+        };
 
-        // Parse SCG: SCG,0101010101 (0=On, 1=Off)
-        let mut banks = vec![true; 10]; // Default all on if parse fails
-        let parts: Vec<&str> = scg_resp.split(',').collect();
-        if parts.len() >= 2 && parts[0] == "SCG" {
-            let mask = parts[1].trim();
-            if mask.len() >= 10 {
-                for (i, c) in mask.chars().take(10).enumerate() {
-                    banks[i] = c == '0';
-                }
-            }
-        }
+        let banks = BankMask::from_scanner_response(&scg_resp);
 
         Self {
             model,
@@ -157,12 +132,13 @@ impl App {
             scan_status: ScanStatus::default(),
             tabs,
             selected_tab: 0,
-            channels: vec![None; 501], // 1-based indexing, 500 channels
+            channels: vec![None; (MAX_CHANNELS + 1) as usize],
             fetch_queue: VecDeque::new(),
-            in_prg_mode: false,
+            mode_manager: mode_mgr,
             banks,
             input_mode: InputMode::Normal,
             table_state: TableState::default().with_selected(Some(0)),
+            error: None,
         }
     }
 
@@ -181,179 +157,78 @@ impl App {
     }
 
     fn next_channel(&mut self) {
+        let max_row = (CHANNELS_PER_BANK - 1) as usize;
         let i = match self.table_state.selected() {
-            Some(i) => {
-                if i >= 49 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
+            Some(i) if i >= max_row => 0,
+            Some(i) => i + 1,
             None => 0,
         };
         self.table_state.select(Some(i));
     }
 
     fn previous_channel(&mut self) {
+        let max_row = (CHANNELS_PER_BANK - 1) as usize;
         let i = match self.table_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    49
-                } else {
-                    i - 1
-                }
-            }
+            Some(0) => max_row,
+            Some(i) => i - 1,
             None => 0,
         };
         self.table_state.select(Some(i));
-    }
-
-    fn selected_channel_index(&self) -> u32 {
-        if self.selected_tab == 0 {
-            return 0;
-        }
-        let bank = self.selected_tab as u32;
-        let row = self.table_state.selected().unwrap_or(0) as u32;
-        (bank - 1) * 50 + row + 1
     }
 
     fn queue_channels_for_tab(&mut self) {
         if self.selected_tab == 0 {
             return;
         }
-        let bank = self.selected_tab as u32; // Tab 1 = Bank 1
-        let start_idx = (bank - 1) * 50 + 1;
-        let end_idx = bank * 50;
+        let bank = self.selected_tab as u32;
+        let start_idx = (bank - 1) * CHANNELS_PER_BANK + 1;
+        let end_idx = bank * CHANNELS_PER_BANK;
 
         for i in start_idx..=end_idx {
-            if self.channels[i as usize].is_none() {
-                // Avoid adding duplicates if possible, or just push
-                if !self.fetch_queue.contains(&i) {
-                    self.fetch_queue.push_back(i);
-                }
+            if self.channels[i as usize].is_none() && !self.fetch_queue.contains(&i) {
+                self.fetch_queue.push_back(i);
             }
         }
     }
 
-    fn update_channel(&mut self, response: String) -> bool {
-        // Expected format: CIN,[INDEX],[NAME],[FRQ],[MOD],...
-        let parts: Vec<&str> = response.split(',').collect();
-        if parts.len() >= 5 && parts[0] == "CIN" {
-            if let Ok(idx) = parts[1].parse::<usize>() {
-                if idx > 0 && idx <= 500 {
-                    let mut freq = parts[3].to_string();
-                    if freq.len() == 8 && freq.chars().all(|c| c.is_digit(10)) {
-                        if freq == "00000000" {
-                            freq = "".to_string();
-                        } else {
-                            let mhz = freq[0..4].trim_start_matches('0');
-                            let mhz = if mhz.is_empty() { "0" } else { mhz };
-                            let khz = freq[4..8].trim_end_matches('0');
-                            if khz.is_empty() {
-                                freq = format!("{}.0", mhz);
-                            } else {
-                                freq = format!("{}.{}", mhz, khz);
-                            }
-                        }
-                    }
-
-                    self.channels[idx] = Some(Channel {
-                        index: idx as u32,
-                        name: parts[2].to_string(),
-                        frequency: freq,
-                        modulation: parts[4].to_string(),
-                    });
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn update_scan_status(&mut self, response: String) {
-        self.scan_status.raw = response.clone();
-        let parts: Vec<&str> = response.split(',').collect();
-        if parts.len() >= 8 && parts[0] == "GLG" {
-            // GLG,[Freq],[Modulation],,[Bank?],,,[Channel Name],
-            // Example: GLG,01285500,AM,,0,,,GLOS APPR,
-            
-            // Format frequency: 01285500 -> 128.5500
-            let raw_freq = parts[1];
-            if raw_freq.len() >= 8 {
-                let mhz = &raw_freq[0..4].trim_start_matches('0');
-                let khz = &raw_freq[4..8];
-                let mhz = if mhz.is_empty() { "0" } else { mhz };
-                self.scan_status.frequency = format!("{}.{}", mhz, khz);
-            } else {
-                self.scan_status.frequency = raw_freq.to_string();
-            }
-
-            self.scan_status.channel_name = parts[7].trim().to_string();
-
-            // Signal Status appears to be at index 8 (1 = Squelch Open/Detected)
-            // Based on example: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
-            if parts.len() > 8 {
-                 self.scan_status.signal_detected = parts[8].trim() == "1";
-            }
-            
-            // Calculate bank from Channel Index (index 11)
-            // Example: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
-            // Channel 52 is Bank 2. ((52-1)/50)+1 = 2.
-            if parts.len() > 11 {
-                 if let Ok(index) = parts[11].trim().parse::<u32>() {
-                     if index > 0 {
-                         let bank = ((index - 1) / 50) + 1;
-                         self.scan_status.bank = bank.to_string();
-                     }
-                 }
-            }
+    /// Update a channel from a CIN response.
+    fn update_channel(&mut self, response: &str) -> bool {
+        if let Some(channel) = Channel::parse_cin(response) {
+            let idx = channel.index.get() as usize;
+            self.channels[idx] = Some(channel);
+            true
+        } else {
+            false
         }
     }
 
-    fn get_scg_string(&self) -> String {
-        let mut s = String::from("SCG,");
-        for &b in &self.banks {
-            s.push(if b { '0' } else { '1' });
+    /// Update scan status from a GLG response.
+    fn update_scan_status(&mut self, response: &str) {
+        if let Some(status) = ScanStatus::parse_glg(response) {
+            self.scan_status = status;
         }
-        s
     }
-}
 
+    /// Get the selected channel index (for renderer popup).
+    pub(crate) fn selected_channel_index(&self) -> u32 {
+        if self.selected_tab == 0 {
+            return 0;
+        }
+        let bank = self.selected_tab as u32;
+        let row = self.table_state.selected().unwrap_or(0) as u32;
+        (bank - 1) * CHANNELS_PER_BANK + row + 1
+    }
 
-
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Percentage((100 - percent_y) / 2),
-                Constraint::Percentage(percent_y),
-                Constraint::Percentage((100 - percent_y) / 2),
-            ]
-            .as_ref(),
-        )
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(
-            [
-                Constraint::Percentage((100 - percent_x) / 2),
-                Constraint::Percentage(percent_x),
-                Constraint::Percentage((100 - percent_x) / 2),
-            ]
-            .as_ref(),
-        )
-        .split(popup_layout[1])[1]
+    /// Check if in PRG mode (for renderer status bar).
+    pub(crate) fn is_in_prg_mode(&self) -> bool {
+        self.mode_manager.is_prg()
+    }
 }
 
 pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
-    // Setup serial port via ScannerClient
     let mut client = ScannerClient::new(&args.console_device)?;
-
     let mut app = App::new(&mut client);
 
-    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -362,548 +237,274 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut last_poll = Instant::now();
 
-    // Main loop
-    loop {
-        // Mode Management
-        if app.selected_tab > 0 && !app.in_prg_mode {
-            let _ = client.send_command("PRG");
-            app.in_prg_mode = true;
-        } else if app.selected_tab == 0 && app.in_prg_mode {
-            let _ = client.send_command("EPG");
-            // Automatically resume scanning when returning to Monitor
-            let _ = client.send_command("KEY,S,P");
-            app.in_prg_mode = false;
+    'main: loop {
+        // Mode Management via ModeManager
+        if app.selected_tab > 0 && !app.is_in_prg_mode() {
+            if let Err(e) = app.mode_manager.ensure_program(&mut client) {
+                app.error = Some(format!("Failed to enter program mode: {}", e));
+            }
+        } else if app.selected_tab == 0 && app.is_in_prg_mode() {
+            if let Err(e) = app.mode_manager.ensure_monitor(&mut client) {
+                app.error = Some(format!("Failed to return to monitor mode: {}", e));
+            }
             app.fetch_queue.clear();
+            app.error = None;
         }
 
         // Fetch Logic
-        if app.in_prg_mode {
+        if app.is_in_prg_mode() {
             if let Some(idx) = app.fetch_queue.pop_front() {
-                let resp = client.send_command(&format!("CIN,{}", idx)).unwrap_or_else(|e| format!("Err: {}", e));
-                if !app.update_channel(resp) {
-                     // Retry if failed (push to back)
-                     app.fetch_queue.push_back(idx);
+                let resp = client
+                    .send_command(&format!("CIN,{}", idx))
+                    .unwrap_or_else(|e| format!("Err: {}", e));
+                if !app.update_channel(&resp) {
+                    app.fetch_queue.push_back(idx);
                 }
             }
-        } else {
-            // Poll scanner status only in Monitor mode
-            if app.selected_tab == 0 && last_poll.elapsed() >= Duration::from_millis(250) {
-                let resp = client.send_command("GLG").unwrap_or_else(|e| format!("Err: {}", e));
-                app.update_scan_status(resp);
-                last_poll = Instant::now();
-            }
+        } else if app.selected_tab == 0
+            && last_poll.elapsed() >= Duration::from_millis(POLL_INTERVAL_MS)
+        {
+            let resp = client
+                .send_command("GLG")
+                .unwrap_or_else(|e| format!("Err: {}", e));
+            app.update_scan_status(&resp);
+            last_poll = Instant::now();
         }
 
-        terminal.draw(|f| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(1)
-                .constraints(
-                    [
-                        Constraint::Length(3), // Tabs
-                        Constraint::Min(0),    // Content
-                        Constraint::Length(3), // Help/Status
-                    ]
-                    .as_ref(),
-                )
-                .split(f.area());
+        terminal.draw(|f| renderer::render(f, &app))?;
 
-            let titles: Vec<&str> = app.tabs.iter().map(|t| t.as_str()).collect();
-            let tabs = Tabs::new(titles)
-                .select(app.selected_tab)
-                .block(Block::default().borders(Borders::ALL).title("Tabs"))
-                .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-                .divider("|");
-            f.render_widget(tabs, chunks[0]);
-
-            if app.selected_tab == 0 {
-                // Monitor View
-                let monitor_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints(
-                        [
-                            Constraint::Length(6),
-                            Constraint::Length(6),
-                            Constraint::Length(3), // Banks
-                        ]
-                        .as_ref(),
-                    )
-                    .split(chunks[1]);
-
-                let info_text = format!(
-                    "Model:   {}
-Version: {}
-Volume:  {}  [v]: Set
-Squelch: {}  [l]: Set",
-                    app.model, app.version, app.volume, app.squelch
-                );
-                let info_paragraph = Paragraph::new(info_text)
-                    .block(Block::default().title("Scanner Info").borders(Borders::ALL));
-                f.render_widget(info_paragraph, monitor_chunks[0]);
-
-                let scan_text = format!(
-                    "Bank:      {}
-Frequency: {} MHz
-Channel:   {}",
-                    app.scan_status.bank,
-                    app.scan_status.frequency,
-                    app.scan_status.channel_name
-                );
-
-                let scan_style = if app.scan_status.signal_detected {
-                    Style::default().bg(Color::Rgb(255, 165, 0)).fg(Color::Black)
-                } else {
-                    Style::default()
-                };
-
-                let scan_paragraph = Paragraph::new(scan_text)
-                    .block(Block::default().title("Live Scan").borders(Borders::ALL).style(scan_style));
-                f.render_widget(scan_paragraph, monitor_chunks[1]);
-
-                // Bank Status
-                let mut bank_spans = vec![Span::raw("Banks: ")];
-                for (i, &active) in app.banks.iter().enumerate() {
-                    let bank_num = i + 1;
-                    let style = if active {
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    };
-                    bank_spans.push(Span::styled(format!("[{}] ", bank_num % 10), style));
-                }
-                let banks_paragraph = Paragraph::new(Line::from(bank_spans))
-                    .block(Block::default().title("Active Banks (Press 1-0 to toggle)").borders(Borders::ALL));
-                f.render_widget(banks_paragraph, monitor_chunks[2]);
-
-            } else {
-                // Bank View
-                let bank = app.selected_tab as u32;
-                let start_idx = (bank - 1) * 50 + 1;
-                let end_idx = bank * 50;
-                
-                let mut rows = Vec::new();
-                for i in start_idx..=end_idx {
-                    if let Some(chan) = &app.channels[i as usize] {
-                        rows.push(Row::new(vec![
-                            chan.index.to_string(),
-                            chan.name.clone(),
-                            chan.frequency.clone(),
-                            chan.modulation.clone(),
-                        ]));
-                    } else {
-                        rows.push(Row::new(vec![
-                            i.to_string(),
-                            "Loading...".to_string(),
-                            "".to_string(),
-                            "".to_string(),
-                        ]));
-                    }
-                }
-                
-                let table = Table::new(
-                    rows,
-                    [
-                        Constraint::Length(5),
-                        Constraint::Length(20),
-                        Constraint::Length(10),
-                        Constraint::Length(5),
-                    ]
-                )
-                .header(Row::new(vec!["Idx", "Name", "Freq", "Mod"]).style(Style::default().add_modifier(Modifier::BOLD)))
-                .block(Block::default().borders(Borders::ALL).title(format!("Bank {}", bank)))
-                .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-                .highlight_symbol(">> ");
-                f.render_stateful_widget(table, chunks[1], &mut app.table_state);
-            }
-
-            let mode_str = if app.in_prg_mode { "Remote (PRG)" } else { "Monitor" };
-            let status_msg = if !app.fetch_queue.is_empty() {
-                format!("Loading... {} remaining ({})", app.fetch_queue.len(), mode_str)
-            } else {
-                if app.selected_tab == 0 {
-                    app.scan_status.raw.clone()
-                } else {
-                    format!("Ready ({})", mode_str)
-                }
-            };
-
-            let help_keys = if app.selected_tab == 0 {
-                "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, '1-0': Toggle Banks, 'q': Quit."
-            } else {
-                "Use Left/Right to switch tabs. Up/Down or j/k to navigate. 'e': Edit, 'd': Delete, 'q': Quit."
-            };
-
-            let help_text = Paragraph::new(format!("{}\nStatus: {}", help_keys, status_msg))
-                .block(Block::default().title("Help").borders(Borders::ALL));
-             f.render_widget(help_text, chunks[2]);
-
-            if app.input_mode == InputMode::ConfirmDelete {
-                let area = centered_rect(60, 20, f.area());
-                f.render_widget(Clear, area);
-                let idx = app.selected_channel_index();
-                let text = format!("\n  Are you sure you want to delete channel {}?\n\n  (y) Yes / (n) No", idx);
-                let block = Block::default().title("Confirm Delete").borders(Borders::ALL).style(Style::default().fg(Color::Red));
-                let paragraph = Paragraph::new(text).block(block);
-                f.render_widget(paragraph, area);
-            }
-
-            if let InputMode::SetLevel(kind) = &app.input_mode {
-                let area = centered_rect(40, 20, f.area());
-                f.render_widget(Clear, area);
-                let text = format!("\n  Enter {} Level (0-15): {}", kind.title(), app.level_input);
-                let block = Block::default()
-                    .title(format!("Set {}", kind.title()))
-                    .borders(Borders::ALL)
-                    .style(Style::default().fg(Color::Yellow));
-                let paragraph = Paragraph::new(text).block(block);
-                f.render_widget(paragraph, area);
-            }
-
-            if let InputMode::Editing(edit_state) = &app.input_mode {
-                let area = centered_rect(60, 40, f.area());
-                f.render_widget(Clear, area);
-
-                let block = Block::default().title("Edit Channel").borders(Borders::ALL);
-                f.render_widget(block, area);
-
-                let inner_area = Layout::default()
-                    .direction(Direction::Vertical)
-                    .margin(2)
-                    .constraints([
-                        Constraint::Length(3),
-                        Constraint::Length(3),
-                        Constraint::Min(0),
-                    ])
-                    .split(area);
-
-                let freq_style = if edit_state.active_field == EditField::Frequency {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default()
-                };
-                let name_style = if edit_state.active_field == EditField::Name {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default()
-                };
-
-                let (freq_text, freq_display_style) = if edit_state.frequency.is_empty() {
-                    ("118.100", Style::default().fg(Color::DarkGray))
-                } else {
-                    (edit_state.frequency.as_str(), freq_style)
-                };
-
-                let freq_input = Paragraph::new(freq_text)
-                    .block(Block::default().title("Frequency (MHz)").borders(Borders::ALL).style(freq_display_style));
-                f.render_widget(freq_input, inner_area[0]);
-
-                let name_input = Paragraph::new(edit_state.name.as_str())
-                    .block(Block::default().title("Name").borders(Borders::ALL).style(name_style));
-                f.render_widget(name_input, inner_area[1]);
-
-                let help = Paragraph::new("Tab: Switch Field | Enter: Save | Esc: Cancel");
-                f.render_widget(help, inner_area[2]);
-            }
-        })?;
-
-        // Poll for input
         let poll_timeout = if !app.fetch_queue.is_empty() {
-            Duration::from_millis(1) 
+            Duration::from_millis(POLL_INTERVAL_ACTIVE_MS)
         } else {
-            Duration::from_millis(50)
+            Duration::from_millis(POLL_INTERVAL_IDLE_MS)
         };
 
-        if event::poll(poll_timeout)? {
-            if let Event::Key(key) = event::read()? {
-                let idx = app.selected_channel_index();
-                match app.input_mode {
-                    InputMode::Normal => match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Right => app.next_tab(),
-                        KeyCode::Left => app.previous_tab(),
-                        KeyCode::Down | KeyCode::Char('j') if app.selected_tab > 0 => {
-                            app.next_channel();
-                        }
-                        KeyCode::Up | KeyCode::Char('k') if app.selected_tab > 0 => {
-                            app.previous_channel();
-                        }
-                        KeyCode::Char('d') if app.selected_tab > 0 => {
-                            app.input_mode = InputMode::ConfirmDelete;
-                        }
-                        KeyCode::Char('e') | KeyCode::Enter if app.selected_tab > 0 => {
-                            let (freq, name) = if let Some(chan) = &app.channels[idx as usize] {
-                                (chan.frequency.clone(), chan.name.clone())
-                            } else {
-                                ("".to_string(), "".to_string())
-                            };
-                            app.input_mode = InputMode::Editing(EditState {
-                                frequency: freq,
-                                name: name,
-                                active_field: EditField::Frequency,
-                            });
-                        }
-                        KeyCode::Char('s') if app.selected_tab == 0 => {
-                            let _ = client.send_command("KEY,S,P");
-                        }
-                        KeyCode::Char('l') if app.selected_tab == 0 => {
-                            app.level_input.clear();
-                            app.input_mode = InputMode::SetLevel(LevelKind::Squelch);
-                        }
-                        KeyCode::Char('v') if app.selected_tab == 0 => {
-                            app.level_input.clear();
-                            app.input_mode = InputMode::SetLevel(LevelKind::Volume);
-                        }
-                        KeyCode::Char('h') if app.selected_tab == 0 => {
-                            let _ = client.send_command("KEY,H,P");
-                        }
-                        KeyCode::Char(c) if app.selected_tab == 0 && c.is_digit(10) => {
-                            if let Some(digit) = c.to_digit(10) {
-                                // 1->0, 2->1, ... 0->9
-                                let bank_idx = if digit == 0 { 9 } else { digit - 1 } as usize;
-                                if bank_idx < 10 {
-                                    app.banks[bank_idx] = !app.banks[bank_idx];
-                                    let scg_cmd = app.get_scg_string();
-                                    // Apply change
-                                    let _ = client.send_command("PRG");
-                                    let _ = client.send_command(&scg_cmd);
-                                    let _ = client.send_command("EPG");
-                                    let _ = client.send_command("KEY,S,P");
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    InputMode::ConfirmDelete => match key.code {
-                        KeyCode::Char('y') => {
-                            let cmd = format!("DCH,{}", idx);
-                            let _ = client.send_command(&cmd);
-                            app.channels[idx as usize] = None;
-                            app.fetch_queue.push_back(idx);
-                            app.input_mode = InputMode::Normal;
-                        }
-                        KeyCode::Char('n') | KeyCode::Esc => {
-                            app.input_mode = InputMode::Normal;
-                        }
-                        _ => {}
-                    },
-                    InputMode::SetLevel(kind) => match key.code {
-                        KeyCode::Char(c) if c.is_digit(10) => {
-                            if app.level_input.len() < 2 {
-                                app.level_input.push(c);
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            app.level_input.pop();
-                        }
-                        KeyCode::Enter => {
-                            if let Ok(lvl) = app.level_input.parse::<u8>() {
-                                if lvl <= 15 {
-                                    let ok = match kind {
-                                        LevelKind::Squelch => client.set_squelch(lvl).is_ok(),
-                                        LevelKind::Volume => client.set_volume(lvl).is_ok(),
-                                    };
-                                    if ok {
-                                        let prefix = kind.response_prefix();
-                                        match kind {
-                                            LevelKind::Squelch => app.squelch = format!("{},{}", prefix, lvl),
-                                            LevelKind::Volume => app.volume = format!("{},{}", prefix, lvl),
-                                        }
-                                    }
-                                }
-                            }
-                            app.input_mode = InputMode::Normal;
-                        }
-                        KeyCode::Esc => {
-                            app.input_mode = InputMode::Normal;
-                        }
-                        _ => {}
-                    },
-                    InputMode::Editing(ref mut edit_state) => match key.code {
-                        KeyCode::Esc => {
-                            app.input_mode = InputMode::Normal;
-                        }
-                        KeyCode::Tab => {
-                            edit_state.active_field = match edit_state.active_field {
-                                EditField::Frequency => EditField::Name,
-                                EditField::Name => EditField::Frequency,
-                            };
-                        }
-                        KeyCode::Char(c) => match edit_state.active_field {
-                            EditField::Frequency => edit_state.frequency.push(c),
-                            EditField::Name => edit_state.name.push(c),
-                        },
-                        KeyCode::Backspace => match edit_state.active_field {
-                            EditField::Frequency => {
-                                edit_state.frequency.pop();
-                            }
-                            EditField::Name => {
-                                edit_state.name.pop();
-                            }
-                        },
-                        KeyCode::Enter => {
-                            let raw_freq = if edit_state.frequency.contains('.') {
-                                let parts: Vec<&str> = edit_state.frequency.split('.').collect();
-                                let mut mhz = parts[0].to_string();
-                                let mut khz = if parts.len() > 1 {
-                                    parts[1].to_string()
-                                } else {
-                                    "".to_string()
-                                };
-
-                                // Pad MHz to 4 digits with leading zeros
-                                while mhz.len() < 4 {
-                                    mhz.insert(0, '0');
-                                }
-                                if mhz.len() > 4 {
-                                    mhz.truncate(4);
-                                }
-
-                                // Pad KHz to 4 digits with trailing zeros
-                                while khz.len() < 4 {
-                                    khz.push('0');
-                                }
-                                if khz.len() > 4 {
-                                    khz.truncate(4);
-                                }
-                                format!("{}{}", mhz, khz)
-                            } else if edit_state.frequency.len() >= 7 {
-                                // Assume raw format if long and no dot
-                                let mut f = edit_state.frequency.clone();
-                                while f.len() < 8 {
-                                    f.insert(0, '0');
-                                }
-                                if f.len() > 8 {
-                                    f.truncate(8);
-                                }
-                                f
-                            } else if !edit_state.frequency.is_empty() {
-                                // Short input without dot, assume MHz
-                                let mut mhz = edit_state.frequency.clone();
-                                while mhz.len() < 4 {
-                                    mhz.insert(0, '0');
-                                }
-                                format!("{}0000", mhz)
-                            } else {
-                                "".to_string()
-                            };
-
-                            let cmd =
-                                format!("CIN,{},{},{},AM,0,0,0,0", idx, edit_state.name, raw_freq);
-                            let _ = client.send_command(&cmd);
-
-                            // Update local state
-                            app.channels[idx as usize] = Some(Channel {
-                                index: idx,
-                                name: edit_state.name.clone(),
-                                frequency: edit_state.frequency.clone(),
-                                modulation: "AM".to_string(),
-                            });
-
-                            app.input_mode = InputMode::Normal;
-                        }
-                        _ => {}
-                    },
-                }
+        if event::poll(poll_timeout)?
+            && let Event::Key(key) = event::read()?
+        {
+            let idx = app.selected_channel_index();
+            if handle_input(&mut app, &mut client, key, idx) {
+                break 'main;
             }
         }
     }
 
-    // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// =============================================================================
+// Input handlers
+// Each returns `true` to signal the app should exit.
+// =============================================================================
 
-    #[test]
-    fn test_parse_glg_response() {
-        let mut app = App {
-            model: "".into(),
-            version: "".into(),
-            volume: "".into(),
-            squelch: "".into(),
-            level_input: "".into(),
-            scan_status: ScanStatus::default(),
-            tabs: vec![],
-            selected_tab: 0,
-            channels: vec![],
-            fetch_queue: VecDeque::new(),
-            in_prg_mode: false,
-            banks: vec![true; 10],
-            input_mode: InputMode::Normal,
-            table_state: TableState::default(),
-        };
+fn handle_input(app: &mut App, client: &mut ScannerClient, key: KeyEvent, idx: u32) -> bool {
+    // Clear any previous error so it can be re-set by the current operation.
+    app.error = None;
 
-        // Example from SCANNER-COMMANDS.md: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
-        app.update_scan_status("GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,".to_string());
-        
-        assert_eq!(app.scan_status.frequency, "123.9750");
-        assert_eq!(app.scan_status.bank, "2");
-        assert_eq!(app.scan_status.channel_name, "BHX RADAR");
+    match &app.input_mode {
+        InputMode::Normal => handle_normal(app, client, key, idx),
+        InputMode::ConfirmDelete => handle_confirm_delete(app, client, key, idx),
+        InputMode::SetLevel(kind) => handle_set_level(app, client, key, *kind),
+        InputMode::Editing(_) => {
+            // Extract edit_state to avoid double-borrow of `app`
+            let mut edit_state = match std::mem::replace(&mut app.input_mode, InputMode::Normal) {
+                InputMode::Editing(s) => s,
+                _ => return false,
+            };
+            let quit = handle_editing(app, client, key, idx, &mut edit_state);
+            // std::mem::replace above already set input_mode to Normal.
+            // Only restore Editing if the key doesn't close the dialog.
+            if !quit && key.code != KeyCode::Esc && key.code != KeyCode::Enter {
+                app.input_mode = InputMode::Editing(edit_state);
+            }
+            quit
+        }
     }
+}
 
-    #[test]
-    fn test_parse_glg_low_frequency() {
-        let mut app = App {
-            model: "".into(),
-            version: "".into(),
-            volume: "".into(),
-            squelch: "".into(),
-            level_input: "".into(),
-            scan_status: ScanStatus::default(),
-            tabs: vec![],
-            selected_tab: 0,
-            channels: vec![],
-            fetch_queue: VecDeque::new(),
-            in_prg_mode: false,
-            banks: vec![true; 10],
-            input_mode: InputMode::Normal,
-            table_state: TableState::default(),
-        };
-
-        // Test with a frequency < 100MHz (padding check)
-        app.update_scan_status("GLG,00881000,FM,,0,,,BBC R2,1,0,,1,".to_string());
-        
-        assert_eq!(app.scan_status.frequency, "88.1000");
-        assert_eq!(app.scan_status.bank, "1");
-        assert_eq!(app.scan_status.channel_name, "BBC R2");
+fn handle_normal(app: &mut App, client: &mut ScannerClient, key: KeyEvent, idx: u32) -> bool {
+    match key.code {
+        KeyCode::Char('q') => return true,
+        KeyCode::Right => app.next_tab(),
+        KeyCode::Left => app.previous_tab(),
+        KeyCode::Down | KeyCode::Char('j') if app.selected_tab > 0 => app.next_channel(),
+        KeyCode::Up | KeyCode::Char('k') if app.selected_tab > 0 => app.previous_channel(),
+        KeyCode::Char('d') if app.selected_tab > 0 => {
+            app.input_mode = InputMode::ConfirmDelete;
+        }
+        KeyCode::Char('e') | KeyCode::Enter if app.selected_tab > 0 => {
+            let (freq, name) = if let Some(chan) = &app.channels[idx as usize] {
+                (chan.frequency.to_string(), chan.name.clone())
+            } else {
+                (String::new(), String::new())
+            };
+            app.input_mode = InputMode::Editing(EditState {
+                frequency: freq,
+                name,
+                active_field: EditField::Frequency,
+            });
+        }
+        KeyCode::Char('s') if app.selected_tab == 0 && client.send_command("KEY,S,P").is_err() => {
+            app.error = Some("Failed to start scan".to_string());
+        }
+        KeyCode::Char('l') if app.selected_tab == 0 => {
+            app.level_input.clear();
+            app.input_mode = InputMode::SetLevel(LevelKind::Squelch);
+        }
+        KeyCode::Char('v') if app.selected_tab == 0 => {
+            app.level_input.clear();
+            app.input_mode = InputMode::SetLevel(LevelKind::Volume);
+        }
+        KeyCode::Char('h') if app.selected_tab == 0 && client.send_command("KEY,H,P").is_err() => {
+            app.error = Some("Failed to hold scan".to_string());
+        }
+        KeyCode::Char(c) if app.selected_tab == 0 && c.is_ascii_digit() => {
+            if let Some(digit) = c.to_digit(10) {
+                let bank = if digit == 0 { NUM_BANKS as u32 } else { digit };
+                let mut new_mask = app.banks.clone();
+                new_mask.toggle(bank);
+                let scg_cmd = new_mask.to_scanner_command();
+                if app.mode_manager.ensure_program(client).is_ok() {
+                    if client.send_command(&scg_cmd).is_ok() {
+                        app.banks = new_mask;
+                    } else {
+                        app.error = Some("Failed to update bank mask".to_string());
+                    }
+                    let _ = app.mode_manager.ensure_monitor(client);
+                } else {
+                    app.error = Some("Failed to enter program mode".to_string());
+                }
+            }
+        }
+        _ => {}
     }
+    false
+}
 
-    #[test]
-    fn test_parse_glg_signal_detected() {
-        let mut app = App {
-            model: "".into(),
-            version: "".into(),
-            volume: "".into(),
-            squelch: "".into(),
-            level_input: "".into(),
-            scan_status: ScanStatus::default(),
-            tabs: vec![],
-            selected_tab: 0,
-            channels: vec![],
-            fetch_queue: VecDeque::new(),
-            in_prg_mode: false,
-            banks: vec![true; 10],
-            input_mode: InputMode::Normal,
-            table_state: TableState::default(),
-        };
-
-        // Case 1: Signal Detected (Index 8 = 1)
-        // Example: GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,
-        app.update_scan_status("GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,".to_string());
-        assert!(app.scan_status.signal_detected);
-        assert_eq!(app.scan_status.channel_name, "BHX RADAR");
-
-        // Case 2: No Signal (Index 8 = 0)
-        app.update_scan_status("GLG,01239750,AM,,0,,,QUIET,0,0,,52,".to_string());
-        assert!(!app.scan_status.signal_detected);
+fn handle_confirm_delete(
+    app: &mut App,
+    client: &mut ScannerClient,
+    key: KeyEvent,
+    idx: u32,
+) -> bool {
+    match key.code {
+        KeyCode::Char('y') => {
+            let cmd = format!("DCH,{}", idx);
+            if client.send_command(&cmd).is_ok() {
+                app.channels[idx as usize] = None;
+                app.fetch_queue.push_back(idx);
+            } else {
+                app.error = Some("Failed to delete channel".to_string());
+            }
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+        }
+        _ => {}
     }
+    false
+}
+
+fn handle_set_level(
+    app: &mut App,
+    client: &mut ScannerClient,
+    key: KeyEvent,
+    kind: LevelKind,
+) -> bool {
+    match key.code {
+        KeyCode::Char(c) if c.is_ascii_digit() && app.level_input.len() < 2 => {
+            app.level_input.push(c);
+        }
+        KeyCode::Backspace => {
+            app.level_input.pop();
+        }
+        KeyCode::Enter => {
+            if let Ok(lvl) = app.level_input.parse::<u8>()
+                && lvl <= MAX_LEVEL
+            {
+                let ok = match kind {
+                    LevelKind::Squelch => client.set_squelch(lvl).is_ok(),
+                    LevelKind::Volume => client.set_volume(lvl).is_ok(),
+                };
+                if ok {
+                    let prefix = kind.response_prefix();
+                    match kind {
+                        LevelKind::Squelch => app.squelch = format!("{},{}", prefix, lvl),
+                        LevelKind::Volume => app.volume = format!("{},{}", prefix, lvl),
+                    }
+                } else {
+                    app.error = Some(format!("Failed to set {} level", kind.title()));
+                }
+            }
+            app.input_mode = InputMode::Normal;
+        }
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_editing(
+    app: &mut App,
+    client: &mut ScannerClient,
+    key: KeyEvent,
+    idx: u32,
+    edit_state: &mut EditState,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            // Caller leaves input_mode as Normal (set by std::mem::replace)
+        }
+        KeyCode::Tab => {
+            edit_state.active_field = match edit_state.active_field {
+                EditField::Frequency => EditField::Name,
+                EditField::Name => EditField::Frequency,
+            };
+        }
+        KeyCode::Char(c) => match edit_state.active_field {
+            EditField::Frequency => edit_state.frequency.push(c),
+            EditField::Name => edit_state.name.push(c),
+        },
+        KeyCode::Backspace => match edit_state.active_field {
+            EditField::Frequency => {
+                edit_state.frequency.pop();
+            }
+            EditField::Name => {
+                edit_state.name.pop();
+            }
+        },
+        KeyCode::Enter => {
+            // Validate user input before sending to the scanner.
+            if let Some(freq) = Frequency::from_user_input(&edit_state.frequency) {
+                let cmd = format!(
+                    "CIN,{},{},{},AM,0,0,0,0",
+                    idx,
+                    edit_state.name,
+                    freq.to_raw()
+                );
+                if client.send_command(&cmd).is_ok() {
+                    app.channels[idx as usize] = Some(Channel {
+                        index: ChannelIndex::new(idx).unwrap(),
+                        name: edit_state.name.clone(),
+                        frequency: freq,
+                        modulation: Modulation::Am,
+                    });
+                } else {
+                    app.error = Some("Failed to update channel".to_string());
+                }
+            } else {
+                app.error = Some("Invalid frequency input".to_string());
+            }
+            // Caller leaves input_mode as Normal (set by std::mem::replace)
+        }
+        _ => {}
+    }
+    false
 }

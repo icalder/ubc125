@@ -1,55 +1,65 @@
+use std::io;
 use std::sync::{Arc, Mutex};
 use tonic::{Request, Response, Status};
+
 use crate::scanner::ScannerClient;
-use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoService;
-use ubc125_grpc::ubc125::v1::scanner_control_service_server::ScannerControlService;
-use ubc125_grpc::ubc125::v1::{
-    GetAudioSettingsRequest, GetAudioSettingsResponse,
-    GetModelInfoRequest, GetModelInfoResponse,
-    GetFirmwareVersionRequest, GetFirmwareVersionResponse,
-    StartScanRequest, StartScanResponse,
-    HoldScanRequest, HoldScanResponse,
-    GetEnabledBanksRequest, GetEnabledBanksResponse,
-    SetEnabledBanksRequest, SetEnabledBanksResponse,
-    GetStatusRequest, GetStatusResponse,
-    GetChannelRequest, GetChannelResponse,
-    SetChannelRequest, SetChannelResponse,
-    DeleteChannelRequest, DeleteChannelResponse,
-};
 use tokio_stream::wrappers::ReceiverStream;
+use ubc125_grpc::ubc125::v1::scanner_control_service_server::ScannerControlService;
+use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoService;
+use ubc125_grpc::ubc125::v1::{
+    DeleteChannelRequest, DeleteChannelResponse, GetAudioSettingsRequest, GetAudioSettingsResponse,
+    GetChannelRequest, GetChannelResponse, GetEnabledBanksRequest, GetEnabledBanksResponse,
+    GetFirmwareVersionRequest, GetFirmwareVersionResponse, GetModelInfoRequest,
+    GetModelInfoResponse, GetStatusRequest, GetStatusResponse, HoldScanRequest, HoldScanResponse,
+    SetChannelRequest, SetChannelResponse, SetEnabledBanksRequest, SetEnabledBanksResponse,
+    StartScanRequest, StartScanResponse,
+};
 
 #[derive(Clone)]
 pub struct ScannerServer {
     pub client: Arc<Mutex<ScannerClient>>,
 }
 
+/// Execute a blocking scanner operation inside `spawn_blocking`.
+///
+/// Acquires the `Mutex<ScannerClient>`, runs the closure, and converts
+/// `io::Error` to `Status::internal`.
+async fn with_scanner<F, T>(client: Arc<Mutex<ScannerClient>>, f: F) -> Result<T, Status>
+where
+    F: FnOnce(&mut ScannerClient) -> Result<T, io::Error> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let mut scanner = client.lock().map_err(|e| Status::internal(e.to_string()))?;
+        f(&mut scanner).map_err(|e| Status::internal(e.to_string()))
+    })
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?
+}
+
+impl ScannerServer {
+    /// Execute a scanner command and return the raw response string.
+    async fn cmd(&self, command: &str) -> Result<String, Status> {
+        let cmd = command.to_string();
+        with_scanner(self.client.clone(), move |client| client.send_command(&cmd)).await
+    }
+}
+
 #[tonic::async_trait]
 impl SystemInfoService for ScannerServer {
     async fn get_model_info(
         &self,
-        request: Request<GetModelInfoRequest>,
+        _request: Request<GetModelInfoRequest>,
     ) -> Result<Response<GetModelInfoResponse>, Status> {
-        println!("Got a request: {:?}", request);
-        let client = self.client.clone();
-        let res = tokio::task::spawn_blocking(move || {
-            let mut client = client.lock().unwrap();
-            client.send_command("MDL").map_err(|e| Status::internal(e.to_string()))
-        }).await.unwrap()?;
-
+        let res = self.cmd("MDL").await?;
         Ok(Response::new(GetModelInfoResponse { result: res }))
     }
 
     async fn get_firmware_version(
         &self,
-        request: Request<GetFirmwareVersionRequest>,
+        _request: Request<GetFirmwareVersionRequest>,
     ) -> Result<Response<GetFirmwareVersionResponse>, Status> {
-        println!("Got a request: {:?}", request);
-        let client = self.client.clone();
-        let res = tokio::task::spawn_blocking(move || {
-            let mut client = client.lock().unwrap();
-            client.send_command("VER").map_err(|e| Status::internal(e.to_string()))
-        }).await.unwrap()?;
-
+        let res = self.cmd("VER").await?;
         Ok(Response::new(GetFirmwareVersionResponse { result: res }))
     }
 }
@@ -62,15 +72,17 @@ impl ScannerControlService for ScannerServer {
         &self,
         _request: Request<GetAudioSettingsRequest>,
     ) -> Result<Response<GetAudioSettingsResponse>, Status> {
-        let client = self.client.clone();
-        let (vol, sql) = tokio::task::spawn_blocking(move || {
-            let mut client = client.lock().unwrap();
-            let vol = client.get_volume().map_err(|e| Status::internal(e.to_string()))?;
-            let sql = client.get_squelch().map_err(|e| Status::internal(e.to_string()))?;
-            Ok::<_, Status>((vol, sql))
-        }).await.unwrap()?;
+        let (vol, sql) = with_scanner(self.client.clone(), |client| {
+            let vol = client.get_volume()?;
+            let sql = client.get_squelch()?;
+            Ok((vol, sql))
+        })
+        .await?;
 
-        Ok(Response::new(GetAudioSettingsResponse { volume: vol, squelch: sql }))
+        Ok(Response::new(GetAudioSettingsResponse {
+            volume: vol,
+            squelch: sql,
+        }))
     }
 
     async fn start_scan(
