@@ -8,8 +8,10 @@ use ratatui::{
 
 use super::console::{App, EditField, EditState, InputMode, LevelKind};
 use crate::constants::{
-    CHANNELS_PER_BANK, POPUP_HEIGHT_CONFIRM, POPUP_HEIGHT_EDIT, POPUP_HEIGHT_LEVEL, POPUP_WIDTH_CONFIRM,
-    POPUP_WIDTH_EDIT, POPUP_WIDTH_LEVEL, TABLE_COL_FREQ, TABLE_COL_INDEX, TABLE_COL_MOD, TABLE_COL_NAME,
+    BANK_STATUS_HEIGHT, CHANNELS_PER_BANK, EDIT_FIELD_HEIGHT, LIVE_SCAN_HEIGHT, MAX_LEVEL,
+    PERCENT_BASE, POPUP_HEIGHT_CONFIRM, POPUP_HEIGHT_EDIT, POPUP_HEIGHT_LEVEL, POPUP_WIDTH_CONFIRM,
+    POPUP_WIDTH_EDIT, POPUP_WIDTH_LEVEL, SCANNER_INFO_HEIGHT, STATUS_BAR_HEIGHT, TABLE_COL_FREQ,
+    TABLE_COL_INDEX, TABLE_COL_MOD, TABLE_COL_NAME, TAB_BAR_HEIGHT,
 };
 
 /// Render the full application frame.
@@ -19,9 +21,9 @@ pub fn render(f: &mut Frame, app: &App) {
         .margin(1)
         .constraints(
             [
-                Constraint::Length(3), // Tabs
-                Constraint::Min(0),    // Content
-                Constraint::Length(3), // Help/Status
+                Constraint::Length(TAB_BAR_HEIGHT), // Tabs
+                Constraint::Min(0),                   // Content
+                Constraint::Length(STATUS_BAR_HEIGHT), // Help/Status
             ]
             .as_ref(),
         )
@@ -59,9 +61,9 @@ fn render_monitor_view(f: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Length(6),
-                Constraint::Length(6),
-                Constraint::Length(3), // Banks
+                Constraint::Length(SCANNER_INFO_HEIGHT),
+                Constraint::Length(LIVE_SCAN_HEIGHT),
+                Constraint::Length(BANK_STATUS_HEIGHT), // Banks
             ]
             .as_ref(),
         )
@@ -243,8 +245,9 @@ fn render_set_level_popup(f: &mut Frame, app: &App, kind: LevelKind) {
     let area = centered_rect(POPUP_WIDTH_LEVEL, POPUP_HEIGHT_LEVEL, f.area());
     f.render_widget(Clear, area);
     let text = format!(
-        "\n  Enter {} Level (0-15): {}",
+        "\n  Enter {} Level (0-{}): {}",
         kind.title(),
+        MAX_LEVEL,
         app.level_input
     );
     let block = Block::default()
@@ -267,8 +270,8 @@ fn render_edit_popup(f: &mut Frame, edit_state: &EditState) {
         .direction(Direction::Vertical)
         .margin(2)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Length(EDIT_FIELD_HEIGHT),
+            Constraint::Length(EDIT_FIELD_HEIGHT),
             Constraint::Min(0),
         ])
         .split(area);
@@ -316,9 +319,9 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .direction(Direction::Vertical)
         .constraints(
             [
-                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage((PERCENT_BASE - percent_y) / 2),
                 Constraint::Percentage(percent_y),
-                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage((PERCENT_BASE - percent_y) / 2),
             ]
             .as_ref(),
         )
@@ -328,9 +331,9 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .direction(Direction::Horizontal)
         .constraints(
             [
-                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage((PERCENT_BASE - percent_x) / 2),
                 Constraint::Percentage(percent_x),
-                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage((PERCENT_BASE - percent_x) / 2),
             ]
             .as_ref(),
         )

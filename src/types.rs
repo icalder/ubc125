@@ -29,14 +29,17 @@ impl Frequency {
     /// format, then wrap as a `Frequency`.
     ///
     /// Accepts several input styles:
-    /// - `"123.9750"` — MHz.KHz form (pads/truncates each part to 4 digits)
+    /// - `"123.9750"` — MHz.KHz form (each part padded to 4 digits)
     /// - `"88.1"`     — KHz right-padded to 4 digits
+    /// - `".1"`       — MHz part omitted (treated as 0 MHz)
+    /// - `"123."`     — KHz part omitted (treated as 0 KHz)
     /// - `"01239750"` — already 8 digits (raw form)
     /// - `"1239750"`  — 7 digits (left-padded to 8)
     /// - `"123"`      — short MHz (treated as MHz with zero KHz)
     ///
-    /// Returns `None` for non-numeric characters, multiple dots, or empty
-    /// input.
+    /// Returns `None` for non-numeric characters, multiple dots, empty
+    /// input, or oversized components (more than 4 MHz or KHz digits, or
+    /// more than 8 raw digits).
     pub fn from_user_input(s: &str) -> Option<Self> {
         let s = s.trim();
         if s.is_empty() {
@@ -61,26 +64,24 @@ impl Frequency {
                 return None;
             }
 
+            // Reject oversized components instead of truncating.
+            if mhz.len() > MHZ_DIGITS || khz.len() > KHZ_DIGITS {
+                return None;
+            }
+
             while mhz.len() < MHZ_DIGITS {
                 mhz.insert(0, '0');
-            }
-            if mhz.len() > MHZ_DIGITS {
-                mhz.truncate(MHZ_DIGITS);
             }
             while khz.len() < KHZ_DIGITS {
                 khz.push('0');
             }
-            if khz.len() > KHZ_DIGITS {
-                khz.truncate(KHZ_DIGITS);
-            }
             format!("{}{}", mhz, khz)
+        } else if s.len() > FREQUENCY_DIGITS {
+            return None;
         } else if s.len() >= 7 {
             let mut f = s.to_string();
             while f.len() < FREQUENCY_DIGITS {
                 f.insert(0, '0');
-            }
-            if f.len() > FREQUENCY_DIGITS {
-                f.truncate(FREQUENCY_DIGITS);
             }
             f
         } else {
@@ -494,6 +495,40 @@ mod tests {
         assert!(Frequency::from_user_input("12a").is_none());
         // Only a dot
         assert!(Frequency::from_user_input(".").is_none());
+    }
+
+    #[test]
+    fn frequency_from_user_input_rejects_oversized_mhz() {
+        // More than 4 MHz digits — should be rejected, not truncated.
+        assert!(Frequency::from_user_input("12345.6").is_none());
+        assert!(Frequency::from_user_input("12345678.9").is_none());
+    }
+
+    #[test]
+    fn frequency_from_user_input_rejects_oversized_khz() {
+        // More than 4 KHz digits — should be rejected, not truncated.
+        assert!(Frequency::from_user_input("123.97500").is_none());
+        assert!(Frequency::from_user_input("88.12345").is_none());
+    }
+
+    #[test]
+    fn frequency_from_user_input_rejects_oversized_raw() {
+        // More than 8 raw digits — should be rejected, not truncated.
+        assert!(Frequency::from_user_input("123456789").is_none());
+    }
+
+    #[test]
+    fn frequency_from_user_input_accepts_leading_dot() {
+        // ".1" is accepted as 0.1000 MHz.
+        let f = Frequency::from_user_input(".1").unwrap();
+        assert_eq!(f.to_raw(), "00001000");
+    }
+
+    #[test]
+    fn frequency_from_user_input_accepts_trailing_dot() {
+        // "123." is accepted as 123.0000 MHz.
+        let f = Frequency::from_user_input("123.").unwrap();
+        assert_eq!(f.to_raw(), "01230000");
     }
 
     // ---- Modulation ----

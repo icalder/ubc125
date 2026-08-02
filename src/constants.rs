@@ -105,3 +105,19 @@ pub const TABLE_COL_FREQ: u16 = 10;
 
 /// Table column width for modulation
 pub const TABLE_COL_MOD: u16 = 5;
+
+// UI layout heights (in terminal rows)
+/// Height of the tab bar
+pub const TAB_BAR_HEIGHT: u16 = 3;
+/// Height of the status/help bar
+pub const STATUS_BAR_HEIGHT: u16 = 3;
+/// Height of the scanner info block
+pub const SCANNER_INFO_HEIGHT: u16 = 6;
+/// Height of the live scan block
+pub const LIVE_SCAN_HEIGHT: u16 = 6;
+/// Height of the bank status block
+pub const BANK_STATUS_HEIGHT: u16 = 3;
+/// Height of each edit-popup input field
+pub const EDIT_FIELD_HEIGHT: u16 = 3;
+/// Base percentage for layout calculations
+pub const PERCENT_BASE: u16 = 100;

@@ -112,12 +112,23 @@ impl App {
 
         // Fetch initial bank status via ModeManager.
         // Only query SCG if we successfully entered program mode.
+        // Capture any initialization errors for display in the status bar.
         let mut mode_mgr = ModeManager::new();
+        let mut init_error: Option<String> = None;
         let scg_resp = if mode_mgr.ensure_program(client).is_ok() {
-            let resp = client.send_command("SCG").unwrap_or_default();
-            let _ = mode_mgr.ensure_monitor(client);
+            let resp = match client.send_command("SCG") {
+                Ok(r) => r,
+                Err(e) => {
+                    init_error = Some(format!("Failed to read bank status: {}", e));
+                    String::new()
+                }
+            };
+            if let Err(e) = mode_mgr.ensure_monitor(client) {
+                init_error = Some(format!("Failed to return to monitor mode: {}", e));
+            }
             resp
         } else {
+            init_error = Some("Failed to enter program mode for bank status".to_string());
             String::new()
         };
 
@@ -138,7 +149,7 @@ impl App {
             banks,
             input_mode: InputMode::Normal,
             table_state: TableState::default().with_selected(Some(0)),
-            error: None,
+            error: init_error,
         }
     }
 
@@ -244,11 +255,14 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                 app.error = Some(format!("Failed to enter program mode: {}", e));
             }
         } else if app.selected_tab == 0 && app.is_in_prg_mode() {
-            if let Err(e) = app.mode_manager.ensure_monitor(&mut client) {
-                app.error = Some(format!("Failed to return to monitor mode: {}", e));
+            match app.mode_manager.ensure_monitor(&mut client) {
+                Ok(()) => {
+                    app.fetch_queue.clear();
+                }
+                Err(e) => {
+                    app.error = Some(format!("Failed to return to monitor mode: {}", e));
+                }
             }
-            app.fetch_queue.clear();
-            app.error = None;
         }
 
         // Fetch Logic
@@ -374,7 +388,9 @@ fn handle_normal(app: &mut App, client: &mut ScannerClient, key: KeyEvent, idx: 
                     } else {
                         app.error = Some("Failed to update bank mask".to_string());
                     }
-                    let _ = app.mode_manager.ensure_monitor(client);
+                    if let Err(e) = app.mode_manager.ensure_monitor(client) {
+                        app.error = Some(format!("Failed to return to monitor mode: {}", e));
+                    }
                 } else {
                     app.error = Some("Failed to enter program mode".to_string());
                 }
