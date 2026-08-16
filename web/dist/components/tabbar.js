@@ -14,7 +14,7 @@ export function renderTabs(container, selected, onSelect) {
     return tab;
   });
   replace(container,
-    box("Tabs", {},
+    box("Tabs", { boxClass: "tabs-compact" }, 
       el("div", { class: "tabs" },
         ...tabs.flatMap((t, i) =>
           i === 0 ? [t] : [el("span", { class: "tab-sep", text: "|" }), t],

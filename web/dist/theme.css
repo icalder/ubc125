@@ -56,8 +56,13 @@ body {
   position: relative;
   border: 1px solid var(--border);
   background: var(--panel);
-  padding: 4px 8px;
+  padding: 10px 8px 4px;
   margin-top: 7px; /* room for the title sitting on the border */
+}
+
+/* The tab bar's 44px-tall row needs no extra headroom under the title. */
+.box.tabs-compact {
+  padding-top: 4px;
 }
 
 .box-title {
