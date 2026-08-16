@@ -86,10 +86,11 @@ function render() {
       onToggleBank: (bank) => toggleBank(bank),
     });
   } else {
+    const [start] = bankRange(state.tab);
     renderBank(viewRoot, {
       bank: state.tab,
-      channels: state.channels,
-      cursor: state.cursor,
+      channels: state.channels.slice(start, start + CHANNELS_PER_BANK),
+      cursor: state.cursor - start, // 0-based within the bank
       loading: state.loadingBank === state.tab,
       onSelect: (i) => {
         state.cursor = (state.tab - 1) * CHANNELS_PER_BANK + 1 + i;

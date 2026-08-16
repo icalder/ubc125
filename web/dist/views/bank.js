@@ -13,7 +13,8 @@ export const CHANNELS_PER_BANK = 50;
 export function renderBank(container, { bank, channels, cursor, onSelect, onEdit, onDelete }) {
   const rows = channels.map((ch, i) => {
     const selected = i === cursor;
-    const idxText = selected ? `>> ${i + 1}` : `${i + 1}`;
+    const abs = (bank - 1) * CHANNELS_PER_BANK + 1 + i;
+    const idxText = selected ? `>> ${abs}` : `${abs}`;
     const row = el("div", {
       class: `row ${selected ? "selected" : ""}`,
       "data-index": String(i),

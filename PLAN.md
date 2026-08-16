@@ -385,16 +385,16 @@ both UI and gRPC.
 
 ## 7. Deliverables checklist
 
-- [ ] `ListChannels` RPC (proto + client op + server + tests W1/W2)
-- [ ] Embedded static serving on the gRPC port (W3)
-- [ ] `web/` vanilla-ESM app (no framework), grpc-web client, committed `web/dist`
-- [ ] Monitor view matching the console (info, live amber scan, bank toggles, scan/hold)
-- [ ] Bank views matching the console (50-row table, cursor, edit modal, delete confirm)
-- [ ] Every action usable by pointer/touch **and** keys (D9); action bar; 44 px targets
-- [ ] Responsive at 390×844 and 1280×720
-- [ ] Offline banner + stream reconnect with backoff
-- [ ] W1–W6 all green (W5 via browser-tools, W6 on hardware)
-- [ ] AGENTS.md + README updated; dist committed; nix flake build still clean
+- [x] `ListChannels` RPC (proto + client op + server + tests W1/W2)
+- [x] Embedded static serving on the gRPC port (W3)
+- [x] `web/` vanilla-ESM app (no framework), grpc-web client, committed `web/dist`
+- [x] Monitor view matching the console (info, live amber scan, bank toggles, scan/hold)
+- [x] Bank views matching the console (50-row table, cursor, edit modal, delete confirm)
+- [x] Every action usable by pointer/touch **and** keys (D9); action bar; 44 px targets
+- [x] Responsive at 390×844 and 1280×720
+- [x] Offline banner + stream reconnect with backoff
+- [x] W1–W6 all green (W5 via browser-tools, W6 on hardware — see `tests/web_e2e.md`)
+- [x] AGENTS.md + README updated; dist committed; nix flake build clean (2026-08-16)
 
 ## 8. Open questions (decide at the start of each phase, not before)
 
@@ -411,9 +411,34 @@ both UI and gRPC.
 
 ---
 
-## 9. Session status (updated 2026-08-16) — read this first when resuming
+## 9. Session status (updated 2026-08-16, Phase D complete) — read this first when resuming
 
 ### State of play
+
+**ALL PHASES DONE.** Web UI is complete, browser-verified at both viewports,
+hardware pass done. `cargo test` 87 pass, clippy clean, `fake_e2e.sh` 25/25,
+`nix flake build` clean, W5 23/23 + 10/10, W6 25/25 (results in
+`tests/web_e2e.md`). Repo committed.
+
+What landed in the final session:
+- **Bank-slice bug fixed** (`web/dist/app.js` slices `state.channels` per
+  bank + 0-based cursor; `views/bank.js` labels rows with absolute indices).
+- **Pointer/tap path browser-verified** (W5): full edit/delete/toggle/
+  scan/hold flows by click at 1280×720; 390×844 phone checks (no h-
+  overflow, 44 px buttons, 50-row table, tap edit/save).
+- **Offline banner verified**: appears when the server connection drops,
+  clears on reconnect. Note: the server keeps `GetStatus` alive through
+  transient poll errors by design, so a GLG hiccup does NOT trigger the
+  banner — only connection loss does (this matches the "serial hiccup must
+  not blank the UI" policy).
+- **W6 hardware pass** on the real scanner: round-trip edit, delete →
+  restore of channel 63 (verified via `GetChannel`), bank-toggle round-
+  trip, scan/hold — 25/25, scanner left as found.
+- Docs: `web/README.md` (layout, D8 import-map rationale, codegen, run,
+  tests), `tests/web_e2e.md` + `tests/web/*.mjs` scripts, AGENTS.md
+  (web/ section + stale stub note removed).
+
+Earlier session state (still accurate):
 
 **Phase A (server: ListChannels + static serving) — DONE, all green.**
 - Proto: `ListChannels(ListChannelsRequest{bank}) → ListChannelsResponse{channels}` added;
@@ -432,8 +457,8 @@ both UI and gRPC.
 - `cargo test`: 87 pass, clippy clean. `fake_e2e.sh`: **25/25 pass**.
 
 **Phase B (scaffold + theme + Monitor) — DONE, browser-verified.**
-**Phase C (Bank view: table, edit, delete) — DONE for keys; pointer path just added, one known bug (see below).**
-**Phase D (polish + W5/W6 + docs) — NOT STARTED except offline banner (done).**
+**Phase C (Bank view: table, edit, delete) — DONE, keys + pointer verified.**
+**Phase D (polish + W5/W6 + docs) — DONE.**
 
 **`tests/fake_scanner.py` was upgraded to be STATEFUL** (this session):
 - CIN read of an unwritten idx → `CIN,{idx},BHX RADAR,01239750,AM,0,0,0,0`
@@ -444,23 +469,7 @@ both UI and gRPC.
 - VOL → `VOL,15`, SQL → `SQL,05` (were bare echoes; web now shows real levels).
 - `fake_e2e.sh` re-run green after these changes.
 
-### KNOWN BUG (fix first thing)
-
-`web/dist/views/bank.js` `renderBank` maps the **whole** `state.channels`
-array (1-based, indices 0..500) — so it renders 501 rows and row labels are
-wrong for banks > 1. The TUI shows **absolute** channel numbers
-(`renderer.rs` line ~136: `start_idx = (bank-1)*50+1 ..= bank*50`,
-`chan.index.to_string()`).
-
-Fix in `web/dist/app.js` `render()`: pass `channels: state.channels.slice(start, end + 1)`
-and `cursor: state.cursor - start` (0-based within bank), where
-`[start, end] = bankRange(state.tab)`. In `web/dist/views/bank.js`, label rows
-with the absolute index: `const abs = (bank - 1) * CHANNELS_PER_BANK + 1 + i;`
-use `abs` for `col.idx` (and the `>> ` prefix row keeps working since `cursor`
-is now 0-based-in-bank). `onSelect(i)` in app.js already computes
-`(state.tab - 1) * 50 + 1 + i` — correct once the array is sliced.
-
-### Just added, NOT yet browser-verified (pointer/tap path, D9)
+### Pointer/tap path (D9) — browser-verified
 
 - `components/tabbar.js`: `renderTabs(container, selected, onSelect)` — tabs clickable.
 - `views/monitor.js`: bank chips clickable (`onToggleBank`); new "Actions" box
@@ -482,35 +491,19 @@ is now 0-based-in-bank). `onSelect(i)` in app.js already computes
   (CDP/background windows; `document.hasFocus() === false`). Verified: `focus()`
   updates `activeElement` but fires no event there. Keep `setActive` explicit.
 
-### Immediate next steps (in order)
+### Notes for future sessions
 
-1. Fix the bank-slice bug above. `cd web && node --check dist/app.js` etc.
-   (debug builds serve `web/dist` from disk at runtime — rust-embed debug
-   behavior — so no rebuild needed for web changes; restart not needed either).
-2. Re-run the pointer-path browser test that was interrupted (script is in the
-   session history; essence: click Bank 2 tab → click row 3 → click Edit btn →
-   set name → click Save → verify row + `GetChannel` round-trip; then delete
-   via buttons). Also verify: bank-chip tap toggles (SCG write), Scan/Hold
-   buttons, tab click, modal buttons, offline banner (stop the fake → banner;
-   restart → recovers).
-3. W5 scripted browser pass **at both viewports** (1280×720 and 390×844 —
-   puppeteer `page.setViewport`): all W5 items in §5. Record results.
-   Note the W5 "hiccup" test needs a way to make the fake stop answering GLG
-   for 3s (e.g. env var / SIGSTOP the fake process — `kill -STOP $FAKE_PID`).
-4. Write `web/README.md`: layout (dist = src, no build step), the exact protoc
-   codegen command (below), import map pinning rationale (D8: import maps chosen),
-   run instructions (`ubc125 serve`, open http://localhost:50051/,
-   `?server=` override), tests (`cd web && node --test dist/tests/freq.test.js`),
-   dev workflow.
-5. Update `AGENTS.md` (describe `web/` + codegen regen path) and tick the
-   §7 checklist items that are done.
-6. W6 hardware pass (needs real scanner on /dev/ttyACM0): same list as W5
-   minus hiccup; round-trip edits only.
-7. `git add -A && commit` — everything in `git status` is uncommitted work
-   (Rust: web.rs, serve.rs, scanner.rs, server.rs, proto+regen; web/: all;
-   tests: both scripts + fake_scanner.py).
-8. Optionally: `nix flake build` sanity (NixOS side) — "flake still clean"
-   checklist item.
+- Debug builds serve `web/dist` from disk at runtime (rust-embed debug
+  behavior) — web changes need only a page reload, no rebuild/restart.
+- The stateful fake scanner is a **separate process** from the server:
+  killing `ubc125` leaves socat + fake running; a half-restarted server can
+  hit "Device or resource busy" on the pty. For a clean reset kill all three
+  (`pgrep -x ubc125`, `pgrep -x socat`, `pgrep -f 'fake_sc[a]nner'` — bracket
+  trick so pgrep doesn't match your own shell) and re-run the stack script.
+- The offline banner only appears on **connection loss**, not on GLG
+  hiccups (see "What landed" above).
+- Hardware work: round-trip writes only (delete → restore is OK if verified
+  via `GetChannel` afterwards), never leave the scanner in a changed state.
 
 ### Environment / tooling cheat-sheet
 
@@ -544,13 +537,11 @@ is now 0-based-in-bank). `onSelect(i)` in app.js already computes
 - **Tests**: `cd web && node --test dist/tests/freq.test.js` (9 pass);
   `cargo test` (87 pass); `nix-shell -p socat grpcurl curl --run 'bash tests/fake_e2e.sh'` (25/25).
 
-### Browser-verified so far (key path + parts of pointer path)
+### Browser-verified (complete)
 
-Monitor: model/version/volume(15)/squelch(05), live amber signal box (fake is
-always squelched-in), bank chips, tab switching, `s`/`h` flashes, `q` message.
-Bank: 50-row table, cursor `>> ` inversion, j/k/arrows, edit modal
-(open/fill/Enter → "Channel N saved"), delete confirm (y → row cleared,
-verified against the now-stateful fake), modal field highlight + Tab cycling,
-number-key bank toggles, pointer: (verified before the known bug) Bank tab
-click. **Not yet verified**: pointer test as a whole post-changes, 390×844
-layout, offline banner, W5 hiccup, W6 hardware.
+Keys: all console keybindings (tabs, j/k/arrows, 1–0 toggles, s/h, e/d, modal
+Enter/Esc/y/n, q message). Pointer: full W5 flows by click/tap at 1280×720
+and 390×844 (edit/save, delete/confirm, bank-chip toggle, Scan/Hold, tab
+clicks, modal buttons), offline banner show/clear, 44 px touch targets, no
+horizontal overflow. Hardware: full W6 pass on the real scanner (25/25).
+Screenshots from the final runs: /tmp/wt-*.png, /tmp/w6-*.png (not committed).

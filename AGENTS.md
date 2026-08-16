@@ -30,9 +30,13 @@ Code for the console mode is in [console.rs](./src/cmd/console.rs).
 
 Exposes a gRPC (and gRPC-Web) interface to the scanner for remote control.  The gRPC service is defined in [services.proto](./lib/grpc/proto/ubc125/v1/services.proto).
 
-Code for the serve mode is in [serve.rs](./src/cmd/serve.rs).  The gRPC handler methods are defined in [server.rs](./src/server.rs).  `SystemInfoService` and `GetAudioSettings` are implemented; the remaining `ScannerControlService` RPCs are stubbed pending full implementation (see [PLAN.md](./PLAN.md)).
+Code for the serve mode is in [serve.rs](./src/cmd/serve.rs).  The gRPC handler methods are defined in [server.rs](./src/server.rs).  All RPCs are implemented.
 
-The server enables `accept_http1`, a permissive CORS layer, and `GrpcWebLayer`, so browsers can talk to it directly over grpc-web.
+The server enables `accept_http1`, a permissive CORS layer, and per-service `GrpcWebLayer`s, so browsers can talk to it directly over grpc-web.  On the same port it also serves the web UI: everything that is not a gRPC path falls through to an axum static router over `web/dist` (embedded at compile time with `rust-embed`; see [web.rs](./src/web.rs)).  `GrpcWebLayer` is applied per service (not as a global fallback) because it 400s all non-grpc-web HTTP/1.1.
+
+### Web UI
+
+A vanilla-ESM browser console (no framework, no build step) in [web/](./web/README.md).  It mimics the terminal console: Monitor view (scanner info, live amber scan box from the `GetStatus` stream, tappable bank toggles, Scan/Hold) plus ten Bank views (50-row channel table, tap-to-select cursor, edit modal, delete confirm).  Every action works by key *and* by pointer/touch; the layout is responsive from 390 px phones to desktop.  `web/dist` is committed and embedded — the Nix build stays node-free.  Browser E2E scripts live in [tests/web/](./tests/web_e2e.md).
 
 ### Trying it with grpcurl
 
@@ -51,7 +55,7 @@ UBC125_REGEN=1 cargo build -p ubc125-grpc
 
 ## Architecture
 
-`ScannerClient` in [scanner.rs](./src/scanner.rs) is the single command layer for the scanner, used by both the console and the gRPC server.  It exposes typed operations (`get_status`, `get_banks`, `set_banks`, `get_channel`, `set_channel`, `delete_channel`, `start_scan`, `hold_scan`, ...) that validate responses and manage the scanner's program mode (PRG/EPG) internally.  `send_command` remains as a raw escape hatch.
+`ScannerClient` in [scanner.rs](./src/scanner.rs) is the single command layer for the scanner, used by both the console and the gRPC server.  It exposes typed operations (`get_status`, `get_banks`, `set_banks`, `get_channel`, `get_bank_channels`, `set_channel`, `delete_channel`, `start_scan`, `hold_scan`, ...) that validate responses and manage the scanner's program mode (PRG/EPG) internally.  `send_command` remains as a raw escape hatch.
 
 - Byte-level I/O goes through the `Transport` trait (`SerialTransport` in production); `ScannerClient::with_transport` accepts a mock for tests.
 - Communication/validation failures surface as `ScannerError`; the gRPC server maps it to status codes (`invalid_argument` / `unavailable` / `internal`).
