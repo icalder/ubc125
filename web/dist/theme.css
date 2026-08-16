@@ -79,6 +79,14 @@ body {
   gap: 8px;
   overflow-x: auto;
   white-space: nowrap;
+  /* stays swipe/drag scrollable on phones, but the visible scrollbar is
+     noise — hide it (all engines) */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .tab {

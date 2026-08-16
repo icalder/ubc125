@@ -22,6 +22,8 @@ export function renderTabs(container, selected, onSelect) {
       ),
     ),
   );
+  // Keep the active tab visible without a scrollbar (phone-width tab bar).
+  container.querySelector(".tab.selected")?.scrollIntoView({ inline: "center", block: "nearest" });
 }
 
 export const NUM_TABS = TAB_LABELS.length;
