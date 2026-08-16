@@ -58,6 +58,10 @@ await sleep(300);
 const nameInput = await p.$("input.field:not(.freq)");
 ok(!!nameInput, "edit modal opened");
 if (nameInput) {
+  // Set the frequency too: row 53 may be empty on a re-run (a previous
+  // run deletes it), and saving needs a valid frequency.
+  const freqInput = await p.$("input.field.freq");
+  await freqInput.evaluate((i) => { i.value = "123.9750"; i.dispatchEvent(new Event("input", { bubbles: true })); });
   await nameInput.evaluate((i) => { i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); });
   await nameInput.type("POINTER TEST");
   await p.evaluate(() => [...document.querySelectorAll("button")].find((btn) => btn.textContent.includes("Save")).click());
@@ -85,6 +89,20 @@ const gone = await p.evaluate(() => ![...document.querySelectorAll(".table .row"
   return cell && cell.textContent.trim().replace(">> ", "") === "53" && r.textContent.includes("POINTER TEST");
 }));
 ok(gone, "row 53 cleared after delete");
+
+// Restore channel 53 so the next run starts from a programmed row
+// (the fake scanner keeps deletions across runs).
+ok(await clickRow(53), "row 53 re-selected for restore");
+await sleep(200);
+ok(await clickText("button.btn", "Edit"), "Edit button clicked (restore)");
+await sleep(300);
+const restoreFreq = await p.$("input.field.freq");
+if (restoreFreq) {
+  await restoreFreq.evaluate((i) => { i.value = "123.9750"; i.dispatchEvent(new Event("input", { bubbles: true })); });
+  await p.evaluate(() => [...document.querySelectorAll("button")].find((btn) => btn.textContent.includes("Save")).click());
+}
+ok(await waitFlash("Channel 53 saved"), "channel 53 restored");
+await sleep(800);
 
 ok(await clickText(".tab", "Monitor"), "Monitor tab clicked");
 await sleep(400);

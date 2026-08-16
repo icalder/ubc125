@@ -29,11 +29,8 @@ if (sawBanner) await p.screenshot({ path: "/tmp/wt-offline-banner.png" });
 
 await sleep(4000);
 process.stdout.write("restarting stack... ");
-execSync(
-  "pgrep -x ubc125 | xargs -r kill; pgrep -x socat | xargs -r kill; " +
-  "pgrep -f 'fake_sc[a]nner' | xargs -r kill; sleep 1; bash /tmp/ubc125_stack.sh",
-  { timeout: 60000 },
-);
+const root = new URL("../..", import.meta.url).pathname; // repo root
+execSync(`bash ${root}tests/ubc125_stack.sh`, { timeout: 60000 });
 const end2 = Date.now() + 40000;
 let recovered = false;
 while (Date.now() < end2 && !recovered) { recovered = !(await banner()); await sleep(1000); }
