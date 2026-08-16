@@ -5,12 +5,19 @@ import { toDisplay } from "../lib/freq.js";
 
 export const CHANNELS_PER_BANK = 50;
 
+/** 1-based inclusive [start, end] channel index range for a 1-based bank. */
+export function bankRange(bank) {
+  return [(bank - 1) * CHANNELS_PER_BANK + 1, bank * CHANNELS_PER_BANK];
+}
+
 /**
  * Render the bank table into `container`.
  * `channels`: array of { name, frequency, modulation } or null, length 50.
  * `cursor`: 0-based index of the selected row.
+ * `loading`: bank is still being fetched (table is dimmed).
  */
-export function renderBank(container, { bank, channels, cursor, onSelect, onEdit, onDelete }) {
+export function renderBank(container, { bank, channels, cursor, loading = false, onSelect, onEdit, onDelete }) {
+  const selected = channels[cursor] ?? null;
   const rows = channels.map((ch, i) => {
     const selected = i === cursor;
     const abs = (bank - 1) * CHANNELS_PER_BANK + 1 + i;
@@ -28,14 +35,17 @@ export function renderBank(container, { bank, channels, cursor, onSelect, onEdit
     return row;
   });
 
+  // Edit stays enabled on empty rows: that is the channel-creation path
+  // (the console's `e` works on any row). Delete is disabled on empty rows
+  // so we never issue DCH for an unprogrammed slot.
   const edit = el("button", { class: "btn", text: "e: Edit" });
   edit.addEventListener("click", onEdit);
-  const del = el("button", { class: "btn danger", text: "d: Delete" });
+  const del = el("button", { class: "btn danger", text: "d: Delete", disabled: !selected });
   del.addEventListener("click", onDelete);
 
   replace(container,
     box(`Bank ${bank}`, {},
-      el("div", { class: "table" },
+      el("div", { class: `table${loading ? " loading" : ""}` },
         el("div", { class: "row header" },
           el("span", { class: "col idx", text: "Idx" }),
           el("span", { class: "col name", text: "Name" }),

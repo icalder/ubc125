@@ -2,9 +2,9 @@
 import { el, box, replace } from "./box.js";
 
 const HELP_MONITOR =
-  "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, '1-0': Toggle Banks, 'q': Quit.";
+  "Use Left/Right to switch tabs. 's': Scan, 'h': Hold, '1-0': Toggle Banks, 'q': Monitor.";
 const HELP_BANK =
-  "Use Left/Right to switch tabs. Up/Down or j/k to navigate. 'e': Edit, 'd': Delete, 'q': Quit.";
+  "Use Left/Right to switch tabs. Up/Down or j/k to navigate. 'e': Edit, 'd': Delete, 'q': Monitor.";
 
 /**
  * Render the help bar. `status` is { text, kind } where kind is one of

@@ -153,7 +153,9 @@ Implementation consequences:
 - The **help bar doubles as an action bar**: bottom-anchored (thumb
   reach), context-sensitive buttons next to the key hints — Monitor view
   shows Scan/Hold; Bank view shows Edit/Delete for the selected row
-  (disabled when the row is empty). Buttons are real `<button>` elements,
+  (Delete disabled when the row is empty; Edit stays enabled — editing an
+  empty row is how a new channel is programmed, matching the console).
+  Buttons are real `<button>` elements,
   keyboard still works as a parallel input path.
 - Modal fields are real focusable `<input>`s — tapping one opens the
   phone's keyboard; the modal footer keeps visible Save/Cancel so no
@@ -305,8 +307,9 @@ web/src/
   input paths (D9).
 - Action bar: the help-bar component renders context buttons
   (Monitor: Scan/Hold; Bank: Edit/Delete for the selected row) as real
-  `<button>`s wired to the same action functions; Edit/Delete disabled on
-  empty rows.
+  `<button>`s wired to the same action functions; Delete disabled on empty
+  rows (Edit stays enabled so new channels can be programmed, matching the
+  console's `e` on any row).
 - Errors: a thin status strip (right side of the help bar) shows
   `unavailable` as `SCANNER OFFLINE`, other errors as the status message.
 

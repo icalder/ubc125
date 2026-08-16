@@ -3,10 +3,11 @@
 import { createClients, stripPrefix, errorMessage } from "./lib/client.js";
 import { el } from "./components/box.js";
 import { fromUserInput, toDisplay } from "./lib/freq.js";
+import { INITIAL_BACKOFF, MAX_BACKOFF, nextBackoff } from "./lib/backoff.js";
 import { renderTabs, NUM_TABS } from "./components/tabbar.js";
 import { renderHelp } from "./components/helpbar.js";
 import { renderMonitor } from "./views/monitor.js";
-import { renderBank, CHANNELS_PER_BANK } from "./views/bank.js";
+import { renderBank, CHANNELS_PER_BANK, bankRange } from "./views/bank.js";
 import { openEditModal, openConfirmDelete as showConfirmDelete } from "./components/modal.js";
 
 const MAX_CHANNELS = 500;
@@ -126,7 +127,7 @@ async function loadInfo() {
 }
 
 async function streamStatus() {
-  let backoff = 1000;
+  let backoff = INITIAL_BACKOFF;
   for (;;) {
     try {
       for await (const s of scanner.getStatus({})) {
@@ -140,7 +141,7 @@ async function streamStatus() {
           raw: s.rawResponse,
           modulation: s.modulation,
         };
-        backoff = 1000;
+        backoff = INITIAL_BACKOFF;
         render();
       }
     } catch (err) {
@@ -149,15 +150,16 @@ async function streamStatus() {
     state.connected = false;
     render();
     await new Promise((r) => setTimeout(r, backoff));
-    backoff = Math.min(backoff * 2, 15000);
+    backoff = nextBackoff(backoff, MAX_BACKOFF);
   }
 }
 
-// -- banks / channels --------------------------------------------------------
-
-function bankRange(bank) {
-  return [(bank - 1) * CHANNELS_PER_BANK + 1, bank * CHANNELS_PER_BANK];
+/** True when the cursor is on an unprogrammed (empty) channel row. */
+function selectedRowEmpty() {
+  return !state.channels[state.cursor];
 }
+
+// -- banks / channels --------------------------------------------------------
 
 function clearBankRange(bank) {
   const [start, end] = bankRange(bank);
@@ -351,8 +353,7 @@ function onKeydown(e) {
 
   switch (e.key) {
     case "q":
-      flash("Quit is not available in the browser");
-      render();
+      setTab(0); // back to Monitor (no concept of quit in the browser)
       return;
     case "ArrowRight":
       setTab((state.tab + 1) % NUM_TABS);
@@ -390,10 +391,12 @@ function onKeydown(e) {
         return;
       case "e":
       case "Enter":
+        // Edit works on empty rows too — that is how new channels are programmed.
         openEdit();
         return;
       case "d":
-        openDeleteModal();
+        // Matches the disabled Delete button on empty rows.
+        if (!selectedRowEmpty()) openDeleteModal();
     }
   }
 }

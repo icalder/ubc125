@@ -6,6 +6,7 @@ export function el(tag, opts = {}, ...children) {
   for (const [key, value] of Object.entries(opts)) {
     if (key === "class") node.className = value;
     else if (key === "text") node.textContent = value;
+    else if (key === "disabled" && value) node.disabled = true;
     else if (key.startsWith("on") && typeof value === "function") {
       node.addEventListener(key.slice(2), value);
     }

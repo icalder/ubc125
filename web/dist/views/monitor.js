@@ -50,11 +50,16 @@ function renderActions(onScan, onHold) {
   return box("Actions", {}, el("div", { class: "actions" }, scan, hold));
 }
 
+/** Chip label for a 1-based bank number; bank 10 shows `[0]` (console `bank_num % 10` quirk). */
+export function bankLabel(bank) {
+  return `[${bank % 10}]`;
+}
+
 function renderBanks(banks, onToggle) {
   const chips = banks.map((active, i) => {
     const chip = el("span", {
       class: `bank-chip ${active ? "on" : "off"}`,
-      text: `[${(i + 1) % 10}]`,
+      text: bankLabel(i + 1),
     });
     chip.addEventListener("click", () => onToggle(i + 1));
     return chip;

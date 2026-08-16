@@ -388,6 +388,21 @@ body {
   border-color: var(--red);
 }
 
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+  border-color: var(--border);
+  color: inherit;
+}
+
+/* Bank table while channels are being fetched (mirrors console "Loading..."). */
+.table.loading {
+  opacity: 0.45;
+}
+
 /* -- offline banner ----------------------------------------------------------- */
 
 .offline-banner {
