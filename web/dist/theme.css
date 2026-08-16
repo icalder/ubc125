@@ -344,6 +344,9 @@ body {
 
 .modal-text {
   color: var(--red);
+  /* first child of the confirm dialog — clear the dialog's top border, like
+     .modal-field:first-of-type does in the edit dialog */
+  margin-top: 12px;
 }
 
 /* -- action buttons ---------------------------------------------------------- */
