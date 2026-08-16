@@ -10,6 +10,9 @@ a socat pty pair:
 nix-shell -p socat grpcurl --run 'bash tests/fake_e2e.sh'   # 18 checks
 ```
 
+Hardware smoke test T4 (console) passed 2026-08-16. Remaining hardware
+checks: T5 (grpcurl matrix against the real scanner) and T7 (stream soak).
+
 Phase 5 (Web UI) is not started.
 
 Goal: put the codebase in a position where the gRPC service interface can be
