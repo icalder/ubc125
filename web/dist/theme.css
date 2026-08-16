@@ -282,12 +282,29 @@ body {
   z-index: 10;
 }
 
-.modal-backdrop .box {
+/* Only the dialog itself gets the fixed width — a descendant match would
+   also hit the nested field boxes and make them spill past the dialog. */
+.modal-backdrop > .box {
   width: min(480px, 92vw);
+  padding-bottom: 12px;
+}
+
+/* Air around the Save/Cancel row (the shared .actions class is tighter in
+   the view action bars, so scope this to the dialog). */
+.modal-backdrop .actions {
+  margin-top: 14px;
+  margin-bottom: 4px;
 }
 
 .modal-field {
-  margin-bottom: 10px;
+  margin-bottom: 16px;
+}
+
+/* The field box's title sits ~11px above its own border; the dialog box's
+   top padding (4px) + normal box margin (7px) isn't enough for the first
+   field, so its title collides with the dialog title. */
+.modal-field:first-of-type {
+  margin-top: 14px;
 }
 
 .field {
