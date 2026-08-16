@@ -24,7 +24,6 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let client = ScannerClient::new(&args.device)?;
     let scanner_server = server::ScannerServer::new(client);
 
-    tracing::info!("Starting server at {}", args.server_addr);
     // Each gRPC service is wrapped in the grpc-web codec individually
     // (GrpcWebLayer as a blanket server layer would 400 every
     // non-grpc-web HTTP/1.1 request, including the browser's static-file
@@ -46,7 +45,7 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         )
         // Everything that is not a gRPC service path is the web UI.
         .fallback_service(web::router());
-    tonic::transport::Server::builder()
+    let server = tonic::transport::Server::builder()
         .accept_http1(true)
         .layer(
             CorsLayer::new()
@@ -54,8 +53,18 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
-        .add_routes(routes.into())
-        .serve(args.server_addr.parse()?)
+        .add_routes(routes.into());
+
+    // Bind first so the banner only prints once the port is actually ours.
+    let listener = tokio::net::TcpListener::bind(&args.server_addr).await?;
+    eprintln!("Scanner device:  {}", args.device);
+    eprintln!("Listening on:    {}", args.server_addr);
+    eprintln!("Web UI:          http://{}/", args.server_addr);
+    eprintln!("gRPC (grpcurl):  grpc://{}", args.server_addr);
+    eprintln!("Use -d for debug logging.");
+
+    server
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
         .await?;
 
     Ok(())
