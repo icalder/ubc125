@@ -131,12 +131,52 @@ Stacked boxes:
    costlier in a browser).
 5. Help bar: navigate/edit/delete/quit hints.
 
-### 1.3 Keyboard parity
+### 1.3 Interaction: keys AND pointer/touch (phones are first-class)
 
-The browser must honor the console keybindings (when not typing in a
-field): ←/→ tabs, ↑/↓/j/k rows, 1–0 bank toggle, `p`/Space scan,
-`m`/`W` hold, `e` edit, `d` delete, `Enter` save, `Esc` cancel/close.
-`q` does not close the browser tab — repurpose as "back to Monitor".
+The terminal works because arrow keys are free; the browser must make
+**every** action available by key *and* by tap/click, with no keyboard
+required at any point. Touch targets ≥ 44 px.
+
+| Action | Keys | Pointer / touch |
+|---|---|---|
+| Switch tab | ←/→ | tap the tab |
+| Select channel row | ↑/↓, j/k | tap the row (cursor follows) |
+| Toggle bank | 1–0 | tap the `[n]` |
+| Scan / Hold | `p`/Space, `m`/`W` | **Scan** / **Hold** buttons in the bottom bar |
+| Edit channel | `e` | tap row, then **Edit** button in the bottom bar (or a per-row ✎ affordance) |
+| Delete channel | `d` | tap row, then **Delete** button → confirm dialog with real **Yes/No** buttons |
+| Save / cancel modal | Enter / Esc | **Save** / **Cancel** buttons in the modal footer |
+| Back to Monitor | `q` | tap the `Monitor` tab |
+
+Implementation consequences:
+
+- The **help bar doubles as an action bar**: bottom-anchored (thumb
+  reach), context-sensitive buttons next to the key hints — Monitor view
+  shows Scan/Hold; Bank view shows Edit/Delete for the selected row
+  (disabled when the row is empty). Buttons are real `<button>` elements,
+  keyboard still works as a parallel input path.
+- Modal fields are real focusable `<input>`s — tapping one opens the
+  phone's keyboard; the modal footer keeps visible Save/Cancel so no
+  Enter key is needed.
+- Row selection is tap-to-move-cursor, not tap-to-edit: two-step
+  (select, then act) matches the console model and avoids fat-finger
+  edits.
+
+### 1.4 Responsive layout (phone portrait → desktop)
+
+- Single fluid column, same box stack; no side-by-side desktop layout to
+  maintain.
+- **Tab bar**: 11 tabs don't fit a 390 px screen — horizontal scroll with
+  the active tab auto-scrolled into view (sticky), or two wrapped rows;
+  decide at Phase B by eyeballing in a 390×844 emulation.
+- **Channel table**: fixed layout, `Name` column absorbs slack and
+  truncates with ellipsis; `Idx`/`Freq`/`Mod` keep tabular widths; 50 rows
+  scroll inside the box on short screens (the cursor row scrolls into
+  view on selection).
+- Font: `clamp()`-based sizing so the terminal density survives both a
+  phone and a 1080p monitor.
+- All of the above must hold at 390×844 (phone portrait) and 1280×720
+  (the console screenshots' size).
 
 ---
 
@@ -151,6 +191,7 @@ field): ←/→ tabs, ↑/↓/j/k rows, 1–0 bank toggle, `p`/Space scan,
 | D5 | **Modulation: display only, v1 is AM-only edits** | Console edit flow is AM-only; keep parity, document. (Modulation is shown in the table and could become a field later.) |
 | D6 | **Volume/squelch: display only in v1** | Console TUI shows them but editing is out of scope; the RPCs exist — stretch goal. |
 | D7 | **Single `GetStatus` stream per client** | Server cancels a previous poller on a new `GetStatus` (already implemented). One UI = one stream; on reconnect the old poller is cleaned up server-side. |
+| D9 | **Pointer/touch is a first-class input path** (§1.3–1.4) | The UI must be fully usable on a phone: every key action has a tap/click equivalent; the help bar doubles as a context-sensitive action bar (Scan/Hold, Edit/Delete); modals have real buttons and focusable inputs; layout is responsive from 390 px to desktop. Keys remain a parallel path, not the only one. |
 | D8 | **Dependency consumption: import maps (default) vs esbuild (fallback)** | Default: `web/dist` is fully static — `index.html` + `app.js` + `theme.css` + `proto/*.js` (generated), with an import map pointing `@grpc/web` and `@bufbuild/protobuf` at pinned jsdelivr ESM URLs. No build step at all; committing `dist/` is committing the app. Fallback (pick this if the UI must work offline/intranet): vendor the two packages into `web/dist/vendor/` via a single `esbuild --bundle` command documented in `web/README.md`. Both keep the Nix flake node-free. Decide when scaffolding (Phase B); record the choice in `web/README.md`. |
 
 ---
@@ -249,14 +290,23 @@ web/src/
   not blank the UI — same policy as the server stream).
 - `banks.js` toggle: optimistic flip → `SetEnabledBanks` → rollback +
   inline error on failure.
-- Edit modal: local fields seeded from the row; `Enter` → `SetChannel` →
-  success blip or inline error (shows the gRPC status message, e.g.
-  "invalid frequency"); `Esc`/backdrop → cancel. Frequency field accepts
-  `123.9750` / `123.975` (server validates via `Frequency`).
-- Delete: confirm dialog → `DeleteChannel` → clear row.
+- Edit modal: local fields seeded from the row (real focusable `<input>`s);
+  Save button or `Enter` → `SetChannel` → success blip or inline error
+  (shows the gRPC status message, e.g. "invalid frequency"); Cancel
+  button, `Esc` or backdrop → cancel. Frequency field accepts `123.9750` /
+  `123.975` (server validates via `Frequency`).
+- Delete: confirm dialog with Yes/No buttons (keys: `d`/Enter/Esc) →
+  `DeleteChannel` → clear row.
 - Global keymap (`app.js`): one `keydown` handler, a switch on the active
   view + focus (ignore keys while a text input is focused, except Esc),
-  mirroring the console table in §1.3.
+  mirroring the console table in §1.3. Keys and pointer events funnel into
+  the **same action functions** (`actions.scan()`, `actions.toggleBank(n)`,
+  `actions.selectRow(i)`, `actions.edit()`, …) — one behavior source, two
+  input paths (D9).
+- Action bar: the help-bar component renders context buttons
+  (Monitor: Scan/Hold; Bank: Edit/Delete for the selected row) as real
+  `<button>`s wired to the same action functions; Edit/Delete disabled on
+  empty rows.
 - Errors: a thin status strip (right side of the help bar) shows
   `unavailable` as `SCANNER OFFLINE`, other errors as the status message.
 
@@ -296,7 +346,7 @@ web/src/
 | W2 | `ListChannels` RPC | add to `fake_e2e.sh` (grpcurl) and `hw_e2e.sh` |
 | W3 | Static serving | `curl -s localhost:PORT/` in both e2e scripts returns index.html; gRPC paths unaffected |
 | W4 | Pure client logic | `node --test web/src/tests/` (node is available via `nix-shell -p nodejs`): frequency display/normalization, bank mask → `[n]` states, backoff sequence |
-| W5 | **Browser E2E against the fake scanner** (no hardware needed): scripted Chrome session via the `browser-tools` skill — load `/`, see model info; Live Scan updates from the stream; toggle a bank (verify fake received SCG write); open Bank 1, table populated from `ListChannels`; edit modal: change name, save, verify via `GetChannel`; delete a slot, verify row cleared; stream survives a fake "hiccup" (fake stops answering GLG for 3s, banner appears, then recovers) | `tests/web_e2e.md` with the exact scripted steps (run with browser-tools; not automated in CI yet) |
+| W5 | **Browser E2E against the fake scanner** (no hardware needed): scripted Chrome session via the `browser-tools` skill, at **both** 1280×720 and a 390×844 phone emulation, **all interactions via CDP click/tap** (the pointer path; the key path is parallel by construction) — load `/`, see model info; Live Scan updates from the stream; tap-toggle a bank (verify fake received SCG write); tap **Scan**/**Hold**; open Bank 1, table populated from `ListChannels`; tap a row → **Edit** → change name → **Save**, verify via `GetChannel`; select → **Delete** → **Yes**, verify row cleared; stream survives a fake "hiccup" (fake stops answering GLG for 3s, banner appears, then recovers) | `tests/web_e2e.md` with the exact scripted steps (run with browser-tools; not automated in CI yet) |
 | W6 | **T6 hardware pass** (real browser, real scanner): same list as W5 minus the hiccup simulation; round-trip edits only (no destructive deletes beyond restoring) | manual, recorded in PLAN status |
 
 ---
@@ -310,15 +360,19 @@ e2e-script updates. Exit: `cargo test` green, clippy clean,
 
 **Phase B — web scaffold + theme + Monitor view** (~half a day)
 Scaffold `web/` per D8, proto codegen, `theme.css`, `box`/`tab-bar`/
-`help-bar` components, `status-stream.js` + `banks.js`, Monitor view.
-Exit: Monitor view visually matches `main-console-screen.png` (side-by-side
-in a browser against the fake scanner); stream updates live; `W4` tests
-run under `node --test`.
+`help-bar` (with action buttons) components, `status-stream.js` +
+`banks.js`, Monitor view. Exit: Monitor view visually matches
+`main-console-screen.png` (side-by-side in a browser against the fake
+scanner) at 1280×720 **and** 390×844; stream updates live; Scan/Hold and
+tap-to-toggle banks work by pointer; `W4` tests run under `node --test`.
 
 **Phase C — Bank view: table, edit, delete** (~half a day)
-`channels.js`, `channel-table.js`, edit modal, delete confirm, global
-keymap parity. Exit: matches `bank1-screen.png` / `edit-frequency.png`;
-edit and delete round-trips verified against the fake scanner.
+`channels.js`, `channel-table.js` (tap-to-select, scroll-into-view), edit
+modal (buttons + inputs), delete confirm, global keymap as parallel input.
+Exit: matches `bank1-screen.png` / `edit-frequency.png` at both viewport
+sizes; the full select→edit→save and select→delete→confirm flows work
+**entirely by tap**; edit and delete round-trips verified against the fake
+scanner.
 
 **Phase D — polish + browser E2E + hardware**
 W5 scripted pass, W6 hardware pass, `web/README.md` (codegen + build +
@@ -334,9 +388,10 @@ both UI and gRPC.
 - [ ] `ListChannels` RPC (proto + client op + server + tests W1/W2)
 - [ ] Embedded static serving on the gRPC port (W3)
 - [ ] `web/` vanilla-ESM app (no framework), grpc-web client, committed `web/dist`
-- [ ] Monitor view matching the console (info, live amber scan, bank toggles, scan/hold keys)
+- [ ] Monitor view matching the console (info, live amber scan, bank toggles, scan/hold)
 - [ ] Bank views matching the console (50-row table, cursor, edit modal, delete confirm)
-- [ ] Keyboard parity (tabs, j/k, 1–0, p/m, e/d, Enter/Esc)
+- [ ] Every action usable by pointer/touch **and** keys (D9); action bar; 44 px targets
+- [ ] Responsive at 390×844 and 1280×720
 - [ ] Offline banner + stream reconnect with backoff
 - [ ] W1–W6 all green (W5 via browser-tools, W6 on hardware)
 - [ ] AGENTS.md + README updated; dist committed; nix flake build still clean
