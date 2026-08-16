@@ -1,6 +1,9 @@
 use crate::scanner::ScannerClient;
 use crate::server;
+use crate::web;
 use clap::Args;
+use tonic_web::GrpcWebLayer;
+use tower::Layer;
 use tower_http::cors::{Any, CorsLayer};
 use ubc125_grpc::ubc125::v1::scanner_control_service_server::ScannerControlServiceServer;
 use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoServiceServer;
@@ -22,6 +25,27 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let scanner_server = server::ScannerServer::new(client);
 
     tracing::info!("Starting server at {}", args.server_addr);
+    // Each gRPC service is wrapped in the grpc-web codec individually
+    // (GrpcWebLayer as a blanket server layer would 400 every
+    // non-grpc-web HTTP/1.1 request, including the browser's static-file
+    // GETs). Native gRPC (h2, application/grpc) passes through untouched.
+    let routes = axum::Router::new()
+        .route_service(
+            "/ubc125.v1.ScannerControlService/{*rest}",
+            GrpcWebLayer::new().layer(ScannerControlServiceServer::new(
+                scanner_server.clone(),
+            )),
+        )
+        .route_service(
+            "/ubc125.v1.SystemInfoService/{*rest}",
+            GrpcWebLayer::new().layer(SystemInfoServiceServer::new(scanner_server)),
+        )
+        .route_service(
+            "/grpc.reflection.v1.ServerReflection/{*rest}",
+            GrpcWebLayer::new().layer(reflection_service),
+        )
+        // Everything that is not a gRPC service path is the web UI.
+        .fallback_service(web::router());
     tonic::transport::Server::builder()
         .accept_http1(true)
         .layer(
@@ -30,10 +54,7 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
-        .layer(tonic_web::GrpcWebLayer::new())
-        .add_service(reflection_service)
-        .add_service(SystemInfoServiceServer::new(scanner_server.clone()))
-        .add_service(ScannerControlServiceServer::new(scanner_server))
+        .add_routes(routes.into())
         .serve(args.server_addr.parse()?)
         .await?;
 

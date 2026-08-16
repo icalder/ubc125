@@ -5,8 +5,8 @@
 # end of a socat pty pair; `ubc125 serve` connects to the other end. grpcurl
 # then exercises every RPC, including the error paths.
 #
-# Requires: socat, grpcurl, python3
-#   nix-shell -p socat grpcurl --run 'bash tests/fake_e2e.sh'
+# Requires: socat, grpcurl, python3, curl
+#   nix-shell -p socat grpcurl curl --run 'bash tests/fake_e2e.sh'
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -75,12 +75,28 @@ out=$(g -d '{"index":999}' $SVC/DeleteChannel); check "DeleteChannel 999" "Inval
 out=$(g -d '{}' $SVC/StartScan); check_ok "StartScan" "$out"
 out=$(g -d '{}' $SVC/HoldScan);  check_ok "HoldScan" "$out"
 
+# The fake answers every CIN read with a populated channel, so a full
+# bank lists all 50 slots.
+out=$(g -d '{"bank":1}' $SVC/ListChannels)
+check "ListChannels bank 1" "BHX RADAR" "$out"
+n=$(echo "$out" | grep -c '"index"'); [ "$n" = "50" ] && { echo "PASS: ListChannels 50 channels"; pass=$((pass+1)); } || { echo "FAIL: ListChannels 50 channels (got $n)"; fail=$((fail+1)); }
+out=$(g -d '{"bank":2}' $SVC/ListChannels);  check "ListChannels bank 2 first index" "\"index\": 51" "$out"
+out=$(g -d '{"bank":0}' $SVC/ListChannels);  check "ListChannels bank 0"  "InvalidArgument" "$out"
+out=$(g -d '{"bank":11}' $SVC/ListChannels); check "ListChannels bank 11" "InvalidArgument" "$out"
+
+# Static file serving: / returns the embedded index.html; gRPC paths
+# are unaffected (the grpcurl calls above already prove that).
+out=$(curl -s http://127.0.0.1:$PORT/)
+check "static / serves index.html" "<html" "$out"
+out=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/nope.js)
+check "static missing file 404" "404" "$out"
+
 out=$(timeout 2 grpcurl -plaintext -d '{}' 127.0.0.1:$PORT $SVC/GetStatus 2>&1 | head -20)
 check "GetStatus stream"     "123.9750" "$out"
 check "GetStatus modulation" "AM" "$out"
 
 out=$(g list $SVC)
-for m in GetAudioSettings StartScan HoldScan GetEnabledBanks SetEnabledBanks GetStatus GetChannel SetChannel DeleteChannel; do
+for m in GetAudioSettings StartScan HoldScan GetEnabledBanks SetEnabledBanks GetStatus GetChannel SetChannel DeleteChannel ListChannels; do
     echo "$out" | grep -q "$m" || { echo "FAIL: reflect missing $m"; fail=$((fail+1)); }
 done
 out=$(g list $SYS)

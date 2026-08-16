@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
-use crate::constants::{MAX_CHANNELS, MAX_LEVEL, PORT_TIMEOUT_MS, READ_TIMEOUT_MS};
+use crate::constants::{CHANNELS_PER_BANK, MAX_CHANNELS, MAX_LEVEL, NUM_BANKS, PORT_TIMEOUT_MS, READ_TIMEOUT_MS};
 use crate::modes::Mode;
 use crate::types::{BankMask, Channel, ChannelIndex, ScanStatus};
 
@@ -62,6 +62,9 @@ pub enum ScannerError {
 
     #[error("channel index must be 1..={MAX_CHANNELS}")]
     InvalidChannelIndex(u32),
+
+    #[error("bank number must be 1..={NUM_BANKS}")]
+    InvalidBank(u32),
 }
 
 /// Scanner negative-acknowledgement tokens (see SCANNER-COMMANDS.md).
@@ -363,6 +366,38 @@ impl ScannerClient {
         Self::validate_index(index)?;
         let cmd = format!("DCH,{index}");
         self.with_program_mode(|client| client.send_action(&cmd))
+    }
+
+    fn validate_bank(bank: u32) -> Result<(), ScannerError> {
+        if (1..=NUM_BANKS as u32).contains(&bank) {
+            Ok(())
+        } else {
+            Err(ScannerError::InvalidBank(bank))
+        }
+    }
+
+    /// Get all non-empty channels in a bank (1–10).
+    ///
+    /// One program-mode session for the whole batch: a single `PRG`, up to
+    /// 50 `CIN` reads, then a single return to monitor mode. Slots that
+    /// fail to read (empty channels time out or reply oddly) are skipped
+    /// rather than failing the whole batch — the caller fills in the
+    /// missing rows.
+    pub fn get_bank_channels(&mut self, bank: u32) -> Result<Vec<Channel>, ScannerError> {
+        Self::validate_bank(bank)?;
+        let first = (bank - 1) * CHANNELS_PER_BANK + 1;
+        let last = bank * CHANNELS_PER_BANK;
+        self.with_program_mode(|client| {
+            let mut channels = Vec::new();
+            for index in first..=last {
+                match client.get_channel(index) {
+                    Ok(channel) if !channel.frequency.is_empty() => channels.push(channel),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("batch fetch: channel {index} skipped: {e}"),
+                }
+            }
+            Ok(channels)
+        })
     }
 }
 
@@ -669,5 +704,90 @@ mod tests {
             *written.lock().unwrap(),
             vec!["PRG\r", "DCH,52\r", "EPG\r", "KEY,S,P\r"]
         );
+    }
+
+    // -- get_bank_channels --
+
+    fn cin_response(index: u32) -> String {
+        format!("CIN,{index},NAME{index},01239750,AM,0,0,0,0")
+    }
+
+    #[test]
+    fn get_bank_channels_sends_one_prg_and_fifty_cins() {
+        let responses: Vec<String> = std::iter::once("PRG".to_string())
+            .chain((1..=50).map(cin_response))
+            .collect();
+        let (mut client, written) = mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let channels = client.get_bank_channels(1).unwrap();
+        assert_eq!(channels.len(), 50);
+        assert_eq!(channels[0].index.get(), 1);
+        assert_eq!(channels[49].index.get(), 50);
+        let written = written.lock().unwrap();
+        // Exactly one mode transition for the whole batch.
+        assert_eq!(written[0], "PRG\r");
+        assert_eq!(written[1], "CIN,1\r");
+        assert_eq!(written[50], "CIN,50\r");
+        assert_eq!(written[51], "EPG\r");
+        assert_eq!(written[52], "KEY,S,P\r");
+        assert_eq!(written.len(), 53);
+    }
+
+    #[test]
+    fn get_bank_channels_second_bank_indexes() {
+        let responses: Vec<String> = std::iter::once("PRG".to_string())
+            .chain((51..=100).map(cin_response))
+            .collect();
+        let (mut client, written) = mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let channels = client.get_bank_channels(2).unwrap();
+        assert_eq!(channels.len(), 50);
+        assert_eq!(channels[0].index.get(), 51);
+        assert_eq!(channels[49].index.get(), 100);
+        let written = written.lock().unwrap();
+        assert_eq!(written[1], "CIN,51\r");
+        assert_eq!(written[50], "CIN,100\r");
+    }
+
+    #[test]
+    fn get_bank_channels_skips_empty_and_failed_slots() {
+        // Slot 1: empty frequency (skipped). Slot 3: ok. Every other slot
+        // replies garbage (unparseable, skipped).
+        let responses: Vec<String> = (1..=50)
+            .map(|i| match i {
+                1 => "CIN,1,EMPTY,00000000,FM,0,0,0,0".to_string(),
+                3 => cin_response(3),
+                _ => "GARBAGE".to_string(),
+            })
+            .collect();
+        let (mut client, _) = mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let channels = client.get_bank_channels(1).unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].index.get(), 3);
+    }
+
+    #[test]
+    fn get_bank_channels_invalid_bank_without_port_access() {
+        let (mut client, written) = mock_client(&[]);
+        for bank in [0u32, 11, 99] {
+            assert!(matches!(
+                client.get_bank_channels(bank),
+                Err(ScannerError::InvalidBank(b)) if b == bank
+            ));
+        }
+        assert!(written.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_bank_channels_stays_in_program_mode_if_already_there() {
+        let responses: Vec<String> = std::iter::once("PRG".to_string())
+            .chain((1..=50).map(cin_response))
+            .collect();
+        let (mut client, written) = mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        client.ensure_program().unwrap();
+        client.get_bank_channels(1).unwrap();
+        let written = written.lock().unwrap();
+        // One PRG (from ensure_program), no EPG afterwards.
+        assert_eq!(written[0], "PRG\r");
+        assert!(!written.iter().any(|w| w == "EPG\r"));
+        assert_eq!(client.mode(), Mode::Program);
     }
 }

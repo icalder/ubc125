@@ -96,6 +96,16 @@ pub struct DeleteChannelRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteChannelResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListChannelsRequest {
+    #[prost(uint32, tag = "1")]
+    pub bank: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListChannelsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub channels: ::prost::alloc::vec::Vec<Channel>,
+}
 /// Generated client implementations.
 pub mod system_info_service_client {
     #![allow(
@@ -800,6 +810,32 @@ pub mod scanner_control_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn list_channels(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListChannelsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListChannelsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ubc125.v1.ScannerControlService/ListChannels",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("ubc125.v1.ScannerControlService", "ListChannels"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -879,6 +915,13 @@ pub mod scanner_control_service_server {
             request: tonic::Request<super::DeleteChannelRequest>,
         ) -> std::result::Result<
             tonic::Response<super::DeleteChannelResponse>,
+            tonic::Status,
+        >;
+        async fn list_channels(
+            &self,
+            request: tonic::Request<super::ListChannelsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListChannelsResponse>,
             tonic::Status,
         >;
     }
@@ -1371,6 +1414,52 @@ pub mod scanner_control_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = DeleteChannelSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/ubc125.v1.ScannerControlService/ListChannels" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListChannelsSvc<T: ScannerControlService>(pub Arc<T>);
+                    impl<
+                        T: ScannerControlService,
+                    > tonic::server::UnaryService<super::ListChannelsRequest>
+                    for ListChannelsSvc<T> {
+                        type Response = super::ListChannelsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListChannelsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ScannerControlService>::list_channels(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListChannelsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

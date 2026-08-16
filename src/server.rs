@@ -15,8 +15,8 @@ use ubc125_grpc::ubc125::v1::{
     GetChannelRequest, GetChannelResponse, GetEnabledBanksRequest, GetEnabledBanksResponse,
     GetFirmwareVersionRequest, GetFirmwareVersionResponse, GetModelInfoRequest,
     GetModelInfoResponse, GetStatusRequest, GetStatusResponse, HoldScanRequest, HoldScanResponse,
-    SetChannelRequest, SetChannelResponse, SetEnabledBanksRequest, SetEnabledBanksResponse,
-    StartScanRequest, StartScanResponse,
+    ListChannelsRequest, ListChannelsResponse, SetChannelRequest, SetChannelResponse,
+    SetEnabledBanksRequest, SetEnabledBanksResponse, StartScanRequest, StartScanResponse,
 };
 
 /// Domain -> proto conversion for a scan status.
@@ -107,6 +107,7 @@ impl From<ScannerError> for Status {
             ScannerError::InvalidVolume(_) => Self::invalid_argument(e.to_string()),
             ScannerError::InvalidSquelch(_) => Self::invalid_argument(e.to_string()),
             ScannerError::InvalidChannelIndex(_) => Self::invalid_argument(e.to_string()),
+            ScannerError::InvalidBank(_) => Self::invalid_argument(e.to_string()),
             ScannerError::Io(_) => Self::unavailable(e.to_string()),
             ScannerError::Timeout { .. } => Self::unavailable(e.to_string()),
             ScannerError::UnexpectedResponse { .. } => Self::internal(e.to_string()),
@@ -299,6 +300,18 @@ impl ScannerControlService for ScannerServer {
         with_scanner(self.client.clone(), move |client| client.delete_channel(index)).await?;
         Ok(Response::new(DeleteChannelResponse {}))
     }
+
+    async fn list_channels(
+        &self,
+        request: Request<ListChannelsRequest>,
+    ) -> Result<Response<ListChannelsResponse>, Status> {
+        let bank = request.into_inner().bank;
+        let channels = with_scanner(self.client.clone(), move |client| client.get_bank_channels(bank))
+            .await?;
+        Ok(Response::new(ListChannelsResponse {
+            channels: channels.into_iter().map(Into::into).collect(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -319,6 +332,46 @@ mod tests {
         ];
         for e in cases {
             assert_eq!(Status::from(e).code(), Code::InvalidArgument);
+        }
+    }
+
+    // -- ListChannels --
+
+    fn list_channel_responses(bank: u32) -> Vec<String> {
+        std::iter::once("PRG".to_string())
+            .chain((1..=50u32).map(|i| {
+                let index = (bank - 1) * 50 + i;
+                format!("CIN,{index},NAME{index},01239750,AM,0,0,0,0")
+            }))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn list_channels_returns_bank_channels() {
+        let responses = list_channel_responses(2);
+        let (client, _) = mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let server = ScannerServer::new(client);
+        let resp = server
+            .list_channels(Request::new(ListChannelsRequest { bank: 2 }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.channels.len(), 50);
+        assert_eq!(resp.channels[0].index, 51);
+        assert_eq!(resp.channels[49].index, 100);
+        assert_eq!(resp.channels[0].name, "NAME51");
+    }
+
+    #[tokio::test]
+    async fn list_channels_invalid_bank_is_invalid_argument() {
+        let (client, _) = mock_client(&[]);
+        let server = ScannerServer::new(client);
+        for bank in [0, 11] {
+            let status = server
+                .list_channels(Request::new(ListChannelsRequest { bank }))
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), Code::InvalidArgument, "bank {bank}");
         }
     }
 

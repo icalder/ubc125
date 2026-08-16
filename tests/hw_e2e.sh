@@ -4,8 +4,8 @@
 # Writes are round-trips only: banks and channel 52 are written back with
 # the exact values that were read. No deletes.
 #
-# Requires: grpcurl. Device defaults to /dev/ttyACM0; override with DEVICE=.
-#   nix-shell -p grpcurl --run 'bash tests/hw_e2e.sh'
+# Requires: grpcurl, curl. Device defaults to /dev/ttyACM0; override with DEVICE=.
+#   nix-shell -p grpcurl curl --run 'bash tests/hw_e2e.sh'
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd $ROOT
@@ -61,6 +61,16 @@ out=$(g -d '{"index":52}' $SVC/GetChannel)
 CH_JSON2=$(echo "$out" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["channel"]))')
 [ "$CH_JSON" = "$CH_JSON2" ] && ok "channel 52 unchanged" || bad "channel 52 unchanged" "before=$CH_JSON after=$CH_JSON2"
 
+echo "== ListChannels (read-only) =="
+out=$(g -d '{"bank":2}' $SVC/ListChannels)
+assert_ok "ListChannels bank 2" "$out"
+assert_grep "ListChannels includes channel 52" "$out" '"index": 52'
+out=$(g -d '{"bank":0}' $SVC/ListChannels);   assert_grep "ListChannels bank 0"   "$out" "InvalidArgument"
+out=$(g -d '{"bank":11}' $SVC/ListChannels);  assert_grep "ListChannels bank 11"  "$out" "InvalidArgument"
+
+echo "== static file serving =="
+out=$(curl -s http://127.0.0.1:$PORT/); assert_grep "static / serves index.html" "$out" "<html"
+
 echo "== scan control =="
 out=$(g -d '{}' $SVC/HoldScan);  assert_ok "HoldScan"  "$out"
 out=$(g -d '{}' $SVC/StartScan); assert_ok "StartScan" "$out"
@@ -71,7 +81,7 @@ assert_grep "GetStatus stream emits" "$out" '"frequency"'
 
 echo "== reflection =="
 out=$(g list $SVC); missing=""
-for m in GetAudioSettings StartScan HoldScan GetEnabledBanks SetEnabledBanks GetStatus GetChannel SetChannel DeleteChannel; do
+for m in GetAudioSettings StartScan HoldScan GetEnabledBanks SetEnabledBanks GetStatus GetChannel SetChannel DeleteChannel ListChannels; do
     echo "$out" | grep -q "$m" || missing="$missing $m"
 done
 [ -z "$missing" ] && ok "reflection lists all ScannerControlService methods" || bad "reflection" "missing:$missing"

@@ -4,6 +4,7 @@ mod modes;
 mod scanner;
 mod server;
 mod types;
+mod web;
 
 use clap::Parser;
 

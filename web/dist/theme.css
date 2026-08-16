@@ -1,0 +1,364 @@
+/* Terminal-styled theme mirroring the ratatui console look. */
+
+:root {
+  --bg: #0a0a0a;
+  --panel: #101010;
+  --fg: #c5c8c6;
+  --dim: #565656;
+  --border: #4a4a4a;
+  --cyan: #46c8c8;
+  --amber: #ffb000;
+  --green: #57d957;
+  --red: #e85555;
+  --yellow: #ffd75f;
+  --invert-fg: #d8d8d8;
+  --invert-bg: #0a0a0a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  padding: 8px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+#app > section {
+  min-height: 0;
+}
+
+#app > section:has(.table) {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* -- box (ratatui Block) ---------------------------------------------------- */
+
+.box {
+  position: relative;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  padding: 4px 8px;
+  margin-top: 7px; /* room for the title sitting on the border */
+}
+
+.box-title {
+  position: absolute;
+  top: -0.72em;
+  left: 10px;
+  padding: 0 5px;
+  background: var(--bg);
+  color: var(--cyan);
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+/* -- tab bar ----------------------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.tab {
+  color: var(--dim);
+  padding: 0 2px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.tab.selected {
+  color: var(--invert-fg);
+  font-weight: bold;
+  text-decoration: underline;
+}
+
+.tab-sep {
+  color: var(--border);
+}
+
+/* -- monitor view ------------------------------------------------------------- */
+
+.label {
+  display: inline-block;
+  min-width: 11ch;
+  color: var(--fg);
+}
+
+.value {
+  color: var(--fg);
+}
+
+.value.freq {
+  color: var(--amber);
+  font-size: 1.6em;
+  font-weight: bold;
+}
+
+.value.name {
+  color: var(--fg);
+}
+
+.freq-line {
+  margin: 4px 0;
+}
+
+.box.signal {
+  background: var(--amber);
+}
+
+/* The title sits on the page background (outside the amber fill), so it
+   keeps its high-contrast color instead of inverting. */
+.box.signal .box-title {
+  color: var(--amber);
+}
+
+.box.signal .label,
+.box.signal .value {
+  color: #000;
+}
+
+.box.signal .value.freq {
+  color: #000;
+  animation: blink 1s step-start infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* -- banks -------------------------------------------------------------------- */
+
+.banks {
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.bank-chip {
+  margin-right: 4px;
+  display: inline-block;
+  min-width: 44px;
+  min-height: 44px;
+  line-height: 44px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.bank-chip:active {
+  background: var(--border);
+}
+
+.bank-chip.on {
+  color: var(--green);
+  font-weight: bold;
+}
+
+.bank-chip.off {
+  color: var(--dim);
+}
+
+/* -- bank table ---------------------------------------------------------------- */
+
+.table {
+  height: 100%;
+  overflow-y: auto;
+}
+
+.row {
+  display: flex;
+}
+
+.row.header {
+  font-weight: bold;
+  color: var(--invert-fg);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+.row .col {
+  flex: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.col.idx {
+  flex: 0 0 8ch;
+}
+
+.col.name {
+  flex: 1 1 auto;
+}
+
+.col.freq {
+  flex: 0 0 12ch;
+}
+
+.col.mod {
+  flex: 0 0 8ch;
+}
+
+.row.selected {
+  background: var(--invert-fg);
+  color: var(--invert-bg);
+  font-weight: bold;
+}
+
+.row:not(.header) {
+  cursor: pointer;
+}
+
+.row:not(.header):active {
+  background: var(--border);
+  color: var(--invert-fg);
+}
+
+/* -- help bar ------------------------------------------------------------------- */
+
+.help-text {
+  color: var(--cyan);
+}
+
+.status {
+  margin-top: 2px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.status.error {
+  color: var(--red);
+  font-weight: bold;
+}
+
+.status.loading {
+  color: var(--yellow);
+}
+
+/* -- modals ----------------------------------------------------------------------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.modal-backdrop .box {
+  width: min(480px, 92vw);
+}
+
+.modal-field {
+  margin-bottom: 10px;
+}
+
+.field {
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: none;
+  outline: none;
+  font: inherit;
+  padding: 2px 6px;
+}
+
+.box.active {
+  border-color: var(--yellow);
+}
+
+.box.active .box-title {
+  color: var(--yellow);
+}
+
+.box.active .field.freq {
+  color: var(--yellow);
+}
+
+.modal-help {
+  margin-top: 4px;
+  color: var(--dim);
+}
+
+.box.danger {
+  border-color: var(--red);
+}
+
+.box.danger .box-title {
+  color: var(--red);
+}
+
+.modal-text {
+  color: var(--red);
+}
+
+/* -- action buttons ---------------------------------------------------------- */
+
+.actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 16px;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  font: inherit;
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.btn.danger {
+  color: var(--red);
+}
+
+.btn.danger:hover {
+  border-color: var(--red);
+}
+
+/* -- offline banner ----------------------------------------------------------- */
+
+.offline-banner {
+  background: var(--red);
+  color: #000;
+  font-weight: bold;
+  text-align: center;
+  padding: 4px 8px;
+}

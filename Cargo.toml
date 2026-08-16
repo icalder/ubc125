@@ -7,6 +7,7 @@ edition = "2024"
 members = ["lib/grpc/rust-gen"]
 
 [dependencies]
+axum = "0.8"
 clap = { version = "4.6.4", features = ["derive", "env"] }
 crossterm = "0.29.0"
 ratatui = "0.30.2"
@@ -14,10 +15,13 @@ serialport = { version = "4.9.0", default-features = false }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+mime_guess = "2"
+rust-embed = "8"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-stream = "0.1.19"
 tonic = "0.14.6"
 tonic-reflection = "0.14.6"
 tonic-web = "0.14.6"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["cors"] }
 ubc125-grpc = { version = "0.1.0", path = "./lib/grpc/rust-gen" }

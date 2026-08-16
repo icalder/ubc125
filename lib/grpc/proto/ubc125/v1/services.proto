@@ -17,6 +17,7 @@ service ScannerControlService {
   rpc GetChannel (GetChannelRequest) returns (GetChannelResponse);
   rpc SetChannel (SetChannelRequest) returns (SetChannelResponse);
   rpc DeleteChannel (DeleteChannelRequest) returns (DeleteChannelResponse);
+  rpc ListChannels (ListChannelsRequest) returns (ListChannelsResponse);
 }
 
 message GetModelInfoRequest {}
@@ -95,3 +96,11 @@ message DeleteChannelRequest {
 }
 
 message DeleteChannelResponse {}
+
+message ListChannelsRequest {
+  uint32 bank = 1;
+}
+
+message ListChannelsResponse {
+  repeated Channel channels = 1;
+}
