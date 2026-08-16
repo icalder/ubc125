@@ -451,6 +451,8 @@ Post-Phase-D polish (on-screen review, 2026-08-16, all committed):
   rule scoped to `.modal-backdrop > .box`); field titles clear the dialog
   title; spacing around fields and the Save/Cancel row (`b61fefd`).
 - Delete-confirm text no longer cramped to the dialog top (`d28b89f`).
+- Box titles: 10 px headroom below the title on all cards; the Tabs box
+  stays compact via `.tabs-compact` (`e9b3728`).
 
 Earlier session state (still accurate):
 
