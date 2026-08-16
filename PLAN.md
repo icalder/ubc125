@@ -1,371 +1,263 @@
-# UBC125 — Refactor & gRPC/Web Delivery Plan
+# UBC125 — Web UI Delivery Plan
 
-**Status (2026-08-16): Phases 1–4 complete.** 77 unit tests passing,
-clippy clean, nix build verified. Scanner hardware is not attached on this
-machine, so hardware smoke tests (T-series) are deferred; in the meantime
-`tests/fake_e2e.sh` runs the full gRPC matrix (T5) against a fake scanner on
-a socat pty pair:
+Scope: browser UI for the core scanning features, talking to the existing
+gRPC server over **grpc-web**. The UI **mimics the console look-and-feel**
+(see `main-console-screen.png`, `bank1-screen.png`, `edit-frequency.png` at
+repo root). Everything else (phases 1–4: typed client, console, build
+hygiene, gRPC service) is complete and verified; this plan assumes it.
 
-```sh
-nix-shell -p socat grpcurl --run 'bash tests/fake_e2e.sh'   # 18 checks
+Reference: the console TUI is the source of truth for layout, content and
+keybindings. The Web UI is a faithful translation to the browser, not a
+re-invention.
+
+---
+
+## 1. What the UI must look like (from the console screenshots)
+
+Global chrome (both views):
+
+- Black background, monospaced font, light-gray/white text, thin white
+  1px borders around titled boxes (ratatui `Block` style: the title sits
+  on the top border line).
+- **Tab bar** (top, boxed): `Monitor | Bank 1 | Bank 2 | … | Bank 10`.
+  Active tab: bold white. Inactive: dim gray.
+- **Help bar** (bottom, boxed): per-view key hints, exactly like the
+  console ("Use Left/Right to switch tabs. Up/Down or j/k to navigate.
+  'e': Edit, 'd': Delete, 'q': Quit." etc.).
+
+Colors (approximate from screenshots):
+
+| Element | Color |
+|---|---|
+| background | `#000000` |
+| text / borders | `#e0e0e0` / white |
+| live scan highlight (box fill) | amber `#ffb000`, black text |
+| enabled bank `[1]` `[2]` | green `#00c000` |
+| disabled bank | dim gray |
+| cursor row in channel table | inverted (white fill, black text) + `>>` marker |
+| edit-modal frequency field | amber border + amber text |
+| edit-modal name field | white border, white text |
+
+### 1.1 Monitor view (default)
+
+Stacked boxes:
+
+1. **Scanner Info** — `Model:`, `Version:`, `Volume:`, `Squelch:` rows.
+2. **Live Scan** — amber-filled box: `Bank:`, `Frequency: <x> MHz`,
+   `Channel:` rows. Updates in real time from the `GetStatus` stream.
+   When no transmission is detected the box shows the idle state (console
+   shows the last/empty GLG state — match that).
+3. **Active Banks (Press 1–0 to toggle)** — `Banks: [1] [2] … [10]`;
+   click toggles (also keys 1–0, 0 = bank 10, like the console).
+4. Help bar: scan/hold hints (`p`/Space: Scan, `m`/W: Hold).
+
+### 1.2 Bank view (×10)
+
+1. Boxed table, columns `Idx | Name | Freq | Mod`, 50 rows. Empty slots
+   render as blank rows (the console prints `Auto` in the Mod column for
+   empties — replicate that quirk).
+2. Row navigation: Up/Down, `j`/`k`, or click. Cursor row inverted with
+   `>>` prefix.
+3. **Edit Channel modal** (overlay, boxed, centered) — opened with `e` or
+   a row action: `Frequency (MHz)` field (amber), `Name` field (white),
+   footer `Enter: Save | Esc: Cancel`, `Tab` switches fields.
+4. Delete with `d` (or row action) — confirmation prompt (console deletes
+   straight away; the Web adds a confirm because a mistyped key is
+   costlier in a browser).
+5. Help bar: navigate/edit/delete/quit hints.
+
+### 1.3 Keyboard parity
+
+The browser must honor the console keybindings (when not typing in a
+field): ←/→ tabs, ↑/↓/j/k rows, 1–0 bank toggle, `p`/Space scan,
+`m`/`W` hold, `e` edit, `d` delete, `Enter` save, `Esc` cancel/close.
+`q` does not close the browser tab — repurpose as "back to Monitor".
+
+---
+
+## 2. Key technical decisions
+
+| # | Decision | Rationale |
+|---|---|---|
+| D1 | **Vite + React + TypeScript** in `web/` | Small, standard, maintainable. No UI kit — the terminal look is custom CSS (a component library would fight the design). |
+| D2 | **`@grpc/web`** for transport | Required by the task. Server side is already wired: `TonicWeb` layer + CORS in `serve.rs`. |
+| D3 | **Same-port serving, embedded static files**: embed `web/dist` at compile time (`staticdir`/`rust-embed`), serve via an axum/tonic fallback route | Nix-installed binaries have no predictable CWD; embedding makes the release binary self-contained and keeps one port. `dist/` is **committed** (same policy as generated proto code) — no node toolchain needed in the Nix build. |
+| D4 | **New `ListChannels` RPC** (`uint32 bank → repeated Channel`) | The bank tab needs 50 channels; 50 sequential `GetChannel` round-trips over HTTP would each do a PRG/EPG mode dance. One RPC = one program-mode session, batched CIN reads. Maps directly onto the console's fetch-queue logic (which already lives in the client as `get_channel`; add a `get_bank_channels(bank)` typed op). |
+| D5 | **Modulation: display only, v1 is AM-only edits** | Console edit flow is AM-only; keep parity, document. (Modulation is shown in the table and could become a field later.) |
+| D6 | **Volume/squelch: display only in v1** | Console TUI shows them but editing is out of scope; the RPCs exist — stretch goal. |
+| D7 | **Single `GetStatus` stream per client** | Server cancels a previous poller on a new `GetStatus` (already implemented). One UI = one stream; on reconnect the old poller is cleaned up server-side. |
+
+---
+
+## 3. Server work (Rust)
+
+### 3.1 `ListChannels` RPC
+
+- `services.proto`:
+  ```proto
+  rpc ListChannels(ListChannelsRequest) returns (ListChannelsResponse);
+  message ListChannelsRequest { uint32 bank = 1; }   // 1..=10
+  message ListChannelsResponse { repeated Channel channels = 1; } // ≤50
+  ```
+- Client: `ScannerClient::get_bank_channels(bank) -> Result<Vec<Channel>>` —
+  one `ensure_program`, 50 `CIN` reads (skip-continue on per-slot timeout,
+  like the console fetch queue), one return-to-monitor. Reuse
+  `get_channel` internally.
+- `server.rs`: validate bank 1..=10 (`invalid_argument`), `with_scanner`,
+  map `Vec<Channel>` → proto `Channel`.
+- Regenerate proto code (`UBC125_REGEN=1 cargo build`), update
+  `tests/fake_scanner.py` (answer CINs for the batch) and
+  `tests/fake_e2e.sh` + `tests/hw_e2e.sh` with `ListChannels` checks.
+- Unit tests (mock transport): command byte order (PRG, 50×CIN, EPG/KEY),
+  empty-bank handling, one mode transition for the whole batch.
+
+### 3.2 Static file serving
+
+- Embed `web/dist` (start with a placeholder `index.html` so the server
+  work is testable before the app exists).
+- Routing: gRPC paths (`/ubc125.v1.*`) hit tonic; everything else serves a
+  file from the embedded dir, `/` → `index.html`, missing file → 404.
+- Verify grpc-web responses still pass through (TonicWeb layer is applied
+  before the static fallback).
+- Tests: `hw_e2e.sh`/`fake_e2e.sh` gain a `curl /` check (200 +
+  `index.html`); a unit/integration test that `/ubc125.v1...` is not
+  shadowed by the static layer.
+
+---
+
+## 4. Web client work (`web/`)
+
+### 4.1 Scaffold
+
+- `npm create vite@latest web -- --template react-ts`; deps: `@grpc/web`,
+  `@grpc/proto-loader` not needed — use generated TS (see 4.2).
+- Generate TS client stubs from `services.proto`
+  (`@bufbuild/protobuf` + `protoc-gen-es` or `@grpc-web` codegen — pick one
+  that produces a browser `XhrTransport` client; keep the generator command
+  in `web/README.md` like the Rust regen path).
+
+### 4.2 Structure (SOLID: one component per box, logic in hooks)
+
+```
+web/src/
+  main.tsx                 # mounts <App/>, global keyboard handler
+  app.tsx                  # tab state (Monitor | Bank 1..10), view switch
+  theme.css                # the whole look: colors, boxes, tab bar, table
+  rpc/client.ts            # grpc-web clients (ScannerControl, SystemInfo)
+  hooks/
+    useScannerInfo.ts      # one-shot: model/version/audio settings
+    useStatusStream.ts     # GetStatus stream, reconnect w/ backoff, last-good state
+    useBanks.ts            # bank mask, toggle(bank) optimistic + rollback
+    useBankChannels.ts     # ListChannels(bank), cache per bank, edit/delete ops
+  views/
+    monitor.tsx            # ScannerInfo + LiveScan + ActiveBanks boxes
+    bank.tsx               # ChannelTable + cursor + edit modal + delete confirm
+  components/
+    box.tsx                # titled bordered box (the ratatui Block equivalent)
+    tab-bar.tsx
+    help-bar.tsx
+    channel-table.tsx
+    edit-channel-modal.tsx
+    confirm.tsx
 ```
 
-All hardware checks passed 2026-08-16:
+- `useStatusStream`: opens `GetStatus` on mount; updates state per message;
+  on error → "SCANNER OFFLINE" banner (red, on the Live Scan box border),
+  reconnect with exponential backoff (1s → 30s cap); keep last good values
+  on screen (a serial hiccup must not blank the UI — same policy as the
+  server stream).
+- `useBanks.toggle`: optimistic flip → `SetEnabledBanks` → rollback +
+  toast on error.
+- Edit modal: local state seeded from the row; `Enter` → `SetChannel` →
+  success blip or inline error (shows the gRPC status message, e.g.
+  "invalid frequency"); `Esc`/backdrop → cancel. Frequency field accepts
+  `123.9750` / `123.975` (server validates via `Frequency`).
+- Delete: confirm dialog → `DeleteChannel` → clear row.
+- Errors: a thin status strip (inside the help bar's right side) shows
+  `unavailable` as `SCANNER OFFLINE`, other errors as the status message.
 
-- T4: console smoke — pass
-- T5: grpcurl matrix against the real scanner — 20/20 pass. Destructive
-  paths were exercised as exact-value round-trips only (bank mask and
-  channel 52 written back with the values just read; no deletes).
-- T7: 10-minute `GetStatus` soak with ~3 unaries/s of concurrent traffic —
-  2273 ticks (3.79/s vs 4/s theoretical; the gap is serial I/O time per
-  poll, no dropped ticks), 1461 unaries, 0 failures.
+### 4.3 Look-and-feel implementation notes
 
-Phase 5 (Web UI) is not started.
+- One CSS file, CSS custom properties for the palette (§1 table).
+- `box.tsx`: 1px solid border; title rendered as text with a black
+  background span overlapping the top border (the ratatui effect).
+- Tabular numbers (`font-variant-numeric: tabular-nums`) so the Freq column
+  doesn't jitter as the stream updates.
+- No scrollbars on the 50-row table (50 rows fit at ≤14px font on a
+  typical screen; if not, the box scrolls internally — match console
+  density).
+- Cursor row: `background: #e0e0e0; color: #000;` + `>>` in the Idx cell.
+- Live Scan box: `background: #ffb000; color: #000;` while a transmission
+  is present (signal_detected), dim amber otherwise.
 
-Goal: put the codebase in a position where the gRPC service interface can be
-completed as a thin layer over a shared, tested scanner client, and a Web UI
-can be introduced over grpc-web.
+### 4.4 Build & wiring
 
-Phases are sequential; each phase ends in a green build, passing tests, and
-a manual smoke check against hardware where noted.
-
----
-
-## Phase 1 — Shared typed scanner client
-
-**Goal:** `ScannerClient` becomes the single command layer for both console
-and gRPC (as AGENTS.md promises). No more raw command strings outside
-`scanner.rs`.
-
-### 1.1 Introduce a `Transport` trait (testability seam)
-
-- New trait in `scanner.rs` (or `src/transport.rs`):
-
-  ```rust
-  #[trait_variant::make] // or a hand-rolled pair of sync/async traits
-  trait Transport {
-      fn write_all(&mut self, buf: &[u8]) -> io::Result<()>;
-      fn read_byte(&mut self) -> io::Result<u8>; // honours port timeout
-  }
-  ```
-
-- `SerialTransport` wraps `Box<dyn SerialPort>` and is the production impl.
-- `ScannerClient::new(device)` keeps its signature but constructs
-  `SerialTransport` internally; add `ScannerClient::with_transport(t)` for
-  tests (and later for the gRPC server).
-- DIP: everything above the transport depends on the trait only.
-
-### 1.2 Introduce a `ScannerError` type
-
-- `#[derive(Debug, thiserror::Error)]` enum:
-
-  ```rust
-  enum ScannerError {
-      Io(#[from] io::Error),
-      Timeout { command: String, partial: String },
-      UnexpectedResponse { command: String, got: String },
-      InvalidVolume(u8),
-      InvalidSquelch(u8),
-      InvalidChannelIndex(u32),
-  }
-  ```
-
-- `send_command` returns `Result<String, ScannerError>`:
-  - read timeout → `Timeout` (do **not** return partial data as `Ok`);
-  - validate non-empty response; prefix validation happens in the typed ops
-    (1.4), not in `send_command` (it is a generic primitive).
-- Add `impl From<ScannerError> for tonic::Status` in `server.rs`:
-  - `Timeout`/`Io` → `unavailable`
-  - `Invalid*` → `invalid_argument`
-  - `UnexpectedResponse` → `internal` (with the raw response in the message)
-
-### 1.3 Move `ModeManager` inside the client
-
-- `ScannerClient` owns the mode state (currently `ModeManager` in
-  `modes.rs`):
-
-  ```rust
-  pub struct ScannerClient {
-      transport: Box<dyn Transport>,
-      mode: Mode,
-  }
-  ```
-
-- `ensure_program`/`ensure_monitor` become private methods; public typed ops
-  (1.4) call them as needed.
-- `modes.rs` keeps the `Mode` enum + its tests; the manager struct is deleted
-  (its only reason to exist was being external).
-
-### 1.4 Typed operations
-
-Replace raw-string call sites with:
-
-```rust
-impl ScannerClient {
-    fn get_model(&mut self) -> Result<String, ScannerError>          // MDL
-    fn get_firmware_version(&mut self) -> Result<String, ScannerError> // VER
-    fn get_volume / set_volume
-    fn get_squelch / set_squelch
-    fn get_status(&mut self) -> Result<ScanStatus, ScannerError>     // GLG + parse
-    fn get_banks(&mut self) -> Result<BankMask, ScannerError>        // SCG read
-    fn set_banks(&mut self, mask: &BankMask) -> Result<(), ScannerError>
-    fn get_channel(&mut self, idx: ChannelIndex) -> Result<Channel, ScannerError> // CIN
-    fn set_channel(&mut self, ch: &Channel) -> Result<(), ScannerError>          // CIN write
-    fn delete_channel(&mut self, idx: ChannelIndex) -> Result<(), ScannerError>  // DCH
-    fn start_scan(&mut self) -> Result<(), ScannerError>             // KEY,S,P
-    fn hold_scan(&mut self) -> Result<(), ScannerError>              // KEY,H,P
-}
-```
-
-Rules:
-
-- Ops that need Program mode (banks, channels, delete) do
-  `ensure_program → command → ensure_monitor` internally, as a single unit.
-  The mode transition back must still run on error paths where the scanner
-  may have been left in PRG (match on where the failure occurred; see
-  2.4 for the test).
-- `get_status` runs `ScanStatus::parse_glg` and maps `None` to
-  `UnexpectedResponse`.
-- `set_channel` builds `CIN,{idx},{name},{freq8},{mod},0,0,0,0` from a
-  `Channel` value. Modulation: send the channel's modulation; document that
-  the console edit flow is currently AM-only (see Phase 5 decision).
-
-### 1.5 `MockTransport` + client tests
-
-- `MockTransport`: scriptable queue of canned byte responses; records all
-  bytes written.
-- Unit tests in `scanner.rs` (mock-based), minimum:
-  - each typed op sends the expected command bytes (incl. trailing `\r`)
-    and parses the canned response;
-  - `get_status` on timeout → `Timeout` error, on garbage →
-    `UnexpectedResponse`;
-  - `set_banks` issues `PRG`, `SCG,…`, `EPG`, `KEY,S,P` in order;
-  - `set_banks` failing on the `SCG` command still issues the return-to-monitor
-    sequence;
-  - volume/squelch bounds validation → `Invalid*` without touching the port;
-  - repeated `ensure` semantics: two `set_banks` in a row issue `PRG` once.
-
-**Exit criteria:** `cargo clippy --all-targets` clean; all tests pass; no
-raw `send_command` calls remain outside `scanner.rs` (grep). Console is not
-yet touched (client is additive).
+- `npm run build` → `web/dist/` (committed, per D3).
+- Root: embed dist in the server (3.2). `just build-web` / npm scripts:
+  `build` (vite), `dev` (vite dev server + `serve` with CORS for dev).
+- Dev workflow: `vite dev` on 5173 proxies nothing — point the app at
+  `127.0.0.1:50051` via an env var; CORS is already permissive.
 
 ---
 
-## Phase 2 — Refactor console onto the typed client
+## 5. Testing
 
-**Goal:** behavior-preserving; console becomes UI + key mapping only.
-
-- `App::new` init sequence uses `get_model`, `get_firmware_version`,
-  `get_volume`, `get_squelch`, `get_banks` (the SCG/PRG dance in
-  `App::new` disappears — `get_banks` handles it).
-- Run loop:
-  - GLG polling → `client.get_status()`; on error, log via `tracing::warn!`
-    and keep the last good status (explicit decision, replacing silent
-    `unwrap_or_else("Err: …")` strings);
-  - fetch queue `CIN,{} → get_channel(idx)`; add a **retry cap** (e.g. 3
-    attempts per channel, then mark the slot with an error state or leave
-    `None` + log) instead of the current unbounded re-queue;
-  - key handlers call `start_scan`, `hold_scan`, `set_banks`,
-    `delete_channel`, `set_channel` — the per-key inline PRG/EPG blocks are
-    deleted.
-- `App` keeps its display state (channels cache, banks, scan_status,
-  input_mode) — that is view state, not scanner state.
-- Fix while here: `App` holds a `ModeManager` field and an `is_in_prg_mode()`
-  used by the renderer status bar. After this phase PRG state lives in the
-  client; expose `client.mode()` (or drop the PRG indicator from the status
-  bar if it becomes noise — decide with a quick UI check).
-
-**Exit criteria:** tests still green; manual smoke on hardware (see test
-matrix, T4): monitor tab, bank tab load, edit, delete, bank toggle, volume,
-squelch, scan/hold — behavior identical to before.
-
----
-
-## Phase 3 — Build & repo hygiene
-
-- **Cargo workspace:** root `Cargo.toml` becomes `[workspace] members =
-  [".", "lib/grpc/rust-gen"]` (or move `rust-gen` under `lib/grpc-gen`);
-  single `Cargo.lock`; delete stale `lib/grpc/rust-gen/Cargo.lock`.
-- **build.rs decision — committed generated code (recommended for this
-  cross-compiled project):**
-  - `build.rs` generates only the descriptor set (needed by
-    `include_file_descriptor_set!` / reflection);
-  - `src/proto/ubc125.v1.rs` stays committed; add a `REGENERATE.md` note or
-    script (`cargo run` one-shot or a justfile recipe) showing how to
-    regenerate after proto changes;
-  - delete the commented-out dead code in build.rs and lib.rs.
-- **Repo cleanup:**
-  - `result/` at repo root is a Nix build artifact — delete and add to
-    `.gitignore`;
-  - move the `grpcurl` example comments out of `serve.rs` into README or
-    SCANNER-COMMANDS.md;
-  - update `AGENTS.md`: describe the real architecture (typed client,
-    transport trait, where parsing lives), fix the serve-mode "TODO" section
-    as the service gets completed.
-- **Dependencies:** add `thiserror`; `tokio` can drop from `full` to
-  `rt-multi-thread, macros, sync, time, net` if nothing needs the rest
-  (verify with a build; optional).
-
-**Exit criteria:** `nix flake check` / `cargo build` in the flake still
-works; clippy clean; tests green; `git status` clean.
-
----
-
-## Phase 4 — Complete the gRPC service
-
-**Goal:** all `ScannerControlService` RPCs implemented as thin wrappers over
-the typed client.
-
-### 4.1 Unary RPCs
-
-| RPC | Implementation |
-|---|---|
-| `StartScan` | `client.start_scan()` |
-| `HoldScan` | `client.hold_scan()` |
-| `GetEnabledBanks` | `client.get_banks()` → 10-entry `repeated bool` |
-| `SetEnabledBanks` | validate len == 10 (`invalid_argument`), build `BankMask`, `client.set_banks()` |
-| `GetChannel` | validate index via `ChannelIndex::new` (`invalid_argument`), `client.get_channel()`; empty channel → response with no `Channel` set |
-| `SetChannel` | validate index + frequency (parse via `Frequency`), build `Channel`, `client.set_channel()` |
-| `DeleteChannel` | validate index, `client.delete_channel()` |
-
-- `with_scanner` helper stays; swap error mapping to
-  `From<ScannerError> for Status` (Phase 1.2).
-- `GetAudioSettings` already works; switch to typed getters.
-
-### 4.2 `GetStatus` server stream
-
-Design:
-
-- On first subscriber, spawn a polling task (`spawn_blocking` loop) that
-  calls `client.get_status()` every `POLL_INTERVAL_MS` (250ms) and pushes
-  `GetStatusResponse` into a bounded `mpsc` channel.
-- Drop the polling task when the stream is cancelled (use
-  `tokio::util::poll_once` / watch on receiver disconnect, or
-  `ReceiverStream` + `Drop` guard on a `CancellationToken`).
-- Only one polling task at a time: hold a
-  `Mutex<Option<CancellationToken>>` on the server; a second concurrent
-  `GetStatus` cancels the first (document this) — or return
-  `resource_exhausted`. Pick one, test both.
-- Map `ScanStatus` → `GetStatusResponse` in one place
-  (`impl From<&ScanStatus> for GetStatusResponse`).
-- On `Timeout`/`UnexpectedResponse`: emit the error into the stream?
-  No — log and skip the tick, keep the stream alive (a momentary serial
-  hiccup should not kill the Web UI). Decision recorded in a comment.
-
-### 4.3 Proto review (before code, cheap now)
-
-- `GetStatusResponse.frequency` is a string — acceptable (scanner-native
-  formatting), but consider adding `modulation` (the console shows it; the
-  Web UI will want it). Adding a field is backward-compatible; do it now.
-- `GetEnabledBanksResponse.banks` / `SetEnabledBanksRequest.banks`:
-  `repeated bool` works but a `uint32` bitmask would be tighter; keep
-  `repeated bool` (simpler for the Web client) — decision: keep.
-- `GetChannelResponse.channel` absent for empty channel: verify the
-  generated prost code uses `Option<Channel>` (proto3 message fields do)
-  and that `GetChannel` for an empty slot returns `None`, not a
-  zero-valued `Channel`.
-
-**Exit criteria:** grpcurl test matrix passes against hardware (T5);
-`grpcurl reflect` lists all methods; no `unimplemented` stubs remain.
-
----
-
-## Phase 5 — Web UI (grpc-web)
-
-**Goal:** browser UI for the core scanning features, talking to the same
-server.
-
-### 5.1 Decide the open questions first (one hour, not code)
-
-- **Modulation in edit flow:** console hardcodes `AM`; proto carries
-  `modulation`. Either (a) extend the console edit popup with a modulation
-  field now, or (b) document AM-only for v1 and let the Web UI send the
-  stored value unchanged. Recommendation: (b) for v1.
-- **Web stack:** plain TS + `@grpc/web` (minimal) vs React. The feature set
-  (live status, bank table, channel edit) fits a small React or even
-  vanilla app; pick the smallest that stays maintainable.
-- **Serving the UI:** static files via `ServeDir` layer on the same tonic
-  port (simplest, single port) — `tower-http` already a dependency.
-
-### 5.2 Server: static file serving
-
-- Add `tower-http` `fs` feature; layer `ServeDir` for `web/dist` (built
-  client) so the app is same-origin (no CORS pain in practice, CORS stays
-  for dev mode with the Vite dev server).
-
-### 5.3 Web client screens (mirror the console)
-
-1. **Monitor:** live `GetStatus` stream (frequency, bank, channel, signal
-   indicator), scan/hold buttons, volume/squelch display, bank toggle
-   (1–10).
-2. **Bank view:** channel table (50 rows), lazy `GetChannel` per row (or
-   batch — consider adding a `ListChannels(bank)` RPC in Phase 4 if the
-   50-sequential-calls pattern is ugly; it maps to the console's fetch
-   queue and is a natural RPC), edit + delete dialogs.
-3. Error surfacing: show `Status` messages (especially `unavailable` =
-   scanner serial trouble) in a status bar.
-
-### 5.4 Verify
-
-- Browser against hardware (T6): stream updates in real time; edit/delete
-   reflected; bank toggles persist; scanner held/started from UI; UI
-   survives a dropped-and-restored `GetStatus` stream (reconnect logic).
-
----
-
-## Test sequence
-
-Unit (per phase, `cargo test`):
-
-| # | Test | Phase |
+| # | What | How |
 |---|---|---|
-| U1 | `MockTransport` canned-response tests for every typed op (command bytes + parse) | 1 |
-| U2 | `send_command` timeout → `ScannerError::Timeout`; empty/garbage → `UnexpectedResponse` | 1 |
-| U3 | PRG/EPG sequencing: correct byte order, no duplicate `PRG`, return-to-monitor on mid-op failure | 1 |
-| U4 | Volume/squelch/channel-index validation errors without port access | 1 |
-| U5 | Existing `types.rs` / `modes.rs` tests remain green (Mode enum tests move/shrink with the manager deletion) | 1–2 |
-| U6 | `From<ScannerError> for Status` mapping table | 4 |
-| U7 | `ScanStatus → GetStatusResponse` mapping | 4 |
-| U8 | `GetStatus` stream: second subscriber cancels first (or rejected); cancellation stops polling (assert on mock) | 4 |
-
-Integration (hardware, scripted where possible with the `scan()` socat
-helper for command-level checks and grpcurl for RPC-level):
-
-| # | Check | Phase |
-|---|---|---|
-| T1 | socat spot-checks still pass after client refactor (`MDL`, `GLG`, `SCG`, `CIN,52`) | 1 |
-| T2 | Full command trace of a console session logged at TRACE level and diffed against a pre-refactor trace (same key sequence) | 2 |
-| T3 | `nix flake` build for x86_64 + aarch64 after workspace change | 3 |
-| T4 | Console smoke: monitor, bank tab load, edit (freq+name), delete, bank toggle ×2, vol/squelch, scan/hold, quit — no regressions | 2 |
-| T5 | grpcurl matrix: every RPC happy path + error paths (bad index 0/501 → `invalid_argument`; `SetEnabledBanks` len≠10 → `invalid_argument`; empty channel → absent `Channel`) | 4 |
-| T6 | Web UI pass: live stream, edit, delete, bank toggle, hold/scan, stream reconnect after server restart | 5 |
-
-Long-haul (once, end of Phase 4):
-
-| # | Check |
-|---|---|
-| T7 | 10-minute `GetStatus` stream soak with a console session running concurrently (mutex contention check — no dropped GLG ticks beyond expected serialization) |
+| W1 | `get_bank_channels` typed op | mock-transport unit tests (command bytes, one mode transition, empty slots) |
+| W2 | `ListChannels` RPC | add to `fake_e2e.sh` (grpcurl) and `hw_e2e.sh` |
+| W3 | Static serving | `curl -s localhost:PORT/` in both e2e scripts returns index.html; gRPC paths unaffected |
+| W4 | Pure client logic | vitest: frequency formatting/parsing passed to the server, bank mask → `[n]` states, backoff sequence |
+| W5 | **Browser E2E against the fake scanner** (no hardware needed): scripted Chrome session via the `browser-tools` skill — load `/`, see model info; Live Scan updates from the stream; toggle a bank (verify fake received SCG write); open Bank 1, table populated from `ListChannels`; edit modal: change name, save, verify via `GetChannel`; delete a slot, verify row cleared; stream survives a fake "hiccup" (fake stops answering GLG for 3s, banner appears, then recovers) | `tests/web_e2e.md` with the exact scripted steps (run with browser-tools; not automated in CI yet) |
+| W6 | **T6 hardware pass** (real browser, real scanner): same list as W5 minus the hiccup simulation; round-trip edits only (no destructive deletes beyond restoring) | manual, recorded in PLAN status |
 
 ---
 
-## Deliverables checklist
+## 6. Phases
 
-- [x] Phase 1: typed `ScannerClient` + `Transport` trait + `ScannerError` + mock tests (22 tests)
-- [x] Phase 2: console on typed client, retry cap, no raw command strings outside `scanner.rs`
-- [x] Phase 3: workspace, build.rs cleanup, `result/` gone, AGENTS.md accurate
-- [x] Phase 4: all 10 RPCs implemented; T5 grpcurl matrix passes via `tests/fake_e2e.sh` and on real hardware (20/20); T7 soak passed
-- [ ] Phase 5: Web UI (monitor + bank management) over grpc-web, same port
-- [x] AGENTS.md "Serve Mode TODO" replaced with actual status
+**Phase A — server: `ListChannels` + static serving** (~half a day)
+Proto change, typed client op, server impl, embedding + routing,
+e2e-script updates. Exit: `cargo test` green, clippy clean,
+`fake_e2e.sh` 20+/20+, `curl /` works.
 
-**Deviations from plan (recorded):**
+**Phase B — web scaffold + theme + Monitor view** (~half a day)
+Scaffold, codegen, `theme.css`, `box`/`tab-bar`/`help-bar`, hooks
+(useScannerInfo, useStatusStream, useBanks), Monitor view. Exit: Monitor
+view visually matches `main-console-screen.png` (side-by-side in browser
+against the fake scanner); stream updates live.
 
-- `GetChannel` on an empty slot returns a `Channel` with empty name and
-  zero frequency rather than an absent `Channel`: the scanner answers
-  `CIN,{idx},,,00000000,...` for empty slots, which parses fine, so there
-  is no observable difference on the wire. Clients should treat
-  zero-frequency as "empty".
-- `GetStatusResponse.modulation` was added to the proto (Phase 4.3
-  suggestion) — clients must regenerate.
-- The GetStatus poller runs its blocking `get_status` per tick inside
-  `spawn_blocking` (the 250ms sleep happens on the async side), so the
-  serial mutex is only held during actual I/O.
+**Phase C — Bank view: table, edit, delete** (~half a day)
+useBankChannels, ChannelTable, edit modal, delete confirm, keyboard
+parity. Exit: matches `bank1-screen.png` / `edit-frequency.png`; edit and
+delete round-trips verified against the fake scanner.
+
+**Phase D — polish + browser E2E + hardware**
+W5 scripted pass, W6 hardware pass, `web/README.md`, AGENTS.md update
+(describe web/ + regen paths), commit dist, final `PLAN` status line.
+Exit: W5 + W6 recorded as passed; repo clean; single-port binary serves
+both UI and gRPC.
+
+---
+
+## 7. Deliverables checklist
+
+- [ ] `ListChannels` RPC (proto + client op + server + tests W1/W2)
+- [ ] Embedded static serving on the gRPC port (W3)
+- [ ] `web/` Vite+React+TS app, grpc-web client, committed `web/dist`
+- [ ] Monitor view matching the console (info, live amber scan, bank toggles, scan/hold keys)
+- [ ] Bank views matching the console (50-row table, cursor, edit modal, delete confirm)
+- [ ] Keyboard parity (tabs, j/k, 1–0, p/m, e/d, Enter/Esc)
+- [ ] Offline banner + stream reconnect with backoff
+- [ ] W1–W6 all green (W5 via browser-tools, W6 on hardware)
+- [ ] AGENTS.md + README updated; dist committed; nix flake build still clean
+
+## 8. Open questions (decide at the start of each phase, not before)
+
+- Codegen tool for TS stubs (`@bufbuild/protobuf` vs `protoc` +
+  `grpc-web` npm codegen) — pick whichever yields the cleanest browser
+  `XhrTransport` client; record the command.
+- `q`/quit mapping in the browser (proposal: back to Monitor).
+- Whether the Live Scan box stays amber when `signal_detected` is false
+  (console keeps it highlighted — match console).
+- Stretch (post-plan): volume/squelch sliders, modulation field in the
+  edit modal, multiple concurrent browser clients.
