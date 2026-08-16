@@ -406,8 +406,11 @@ both UI and gRPC.
 - `q`/quit mapping in the browser (proposal: back to Monitor).
 - Whether the Live Scan box stays amber when `signal_detected` is false
   (console keeps it highlighted — match console).
-- Stretch (post-plan): volume/squelch sliders, modulation field in the
-  edit modal, multiple concurrent browser clients.
+- Stretch (post-plan): volume/squelch **editing** (agreed 2026-08-16 to
+  defer; note the client ops `set_volume`/`set_squelch` exist in
+  `ScannerClient`, but there is **no** `SetAudioSettings` RPC yet — the
+  proto has only `GetAudioSettings`, so the proto needs a new RPC first),
+  modulation field in the edit modal, multiple concurrent browser clients.
 
 ---
 
@@ -437,6 +440,17 @@ What landed in the final session:
 - Docs: `web/README.md` (layout, D8 import-map rationale, codegen, run,
   tests), `tests/web_e2e.md` + `tests/web/*.mjs` scripts, AGENTS.md
   (web/ section + stale stub note removed).
+
+Post-Phase-D polish (on-screen review, 2026-08-16, all committed):
+- `serve` prints a startup banner (device, listening addr, Web UI URL,
+  grpcurl addr) via `eprintln!` after the listener binds (tracing defaults
+  to WARN, so the old `info!` never showed). Commits `0561757`.
+- Tab bar: scrollbar hidden (all engines), still swipeable; selected tab
+  auto-scrolled into view (`21beeca`).
+- Edit modal: nested field boxes no longer spill past the dialog (width
+  rule scoped to `.modal-backdrop > .box`); field titles clear the dialog
+  title; spacing around fields and the Save/Cancel row (`b61fefd`).
+- Delete-confirm text no longer cramped to the dialog top (`d28b89f`).
 
 Earlier session state (still accurate):
 
