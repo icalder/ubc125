@@ -10,8 +10,15 @@ a socat pty pair:
 nix-shell -p socat grpcurl --run 'bash tests/fake_e2e.sh'   # 18 checks
 ```
 
-Hardware smoke test T4 (console) passed 2026-08-16. Remaining hardware
-checks: T5 (grpcurl matrix against the real scanner) and T7 (stream soak).
+All hardware checks passed 2026-08-16:
+
+- T4: console smoke — pass
+- T5: grpcurl matrix against the real scanner — 20/20 pass. Destructive
+  paths were exercised as exact-value round-trips only (bank mask and
+  channel 52 written back with the values just read; no deletes).
+- T7: 10-minute `GetStatus` soak with ~3 unaries/s of concurrent traffic —
+  2273 ticks (3.79/s vs 4/s theoretical; the gap is serial I/O time per
+  poll, no dropped ticks), 1461 unaries, 0 failures.
 
 Phase 5 (Web UI) is not started.
 
@@ -346,7 +353,7 @@ Long-haul (once, end of Phase 4):
 - [x] Phase 1: typed `ScannerClient` + `Transport` trait + `ScannerError` + mock tests (22 tests)
 - [x] Phase 2: console on typed client, retry cap, no raw command strings outside `scanner.rs`
 - [x] Phase 3: workspace, build.rs cleanup, `result/` gone, AGENTS.md accurate
-- [x] Phase 4: all 10 RPCs implemented; T5 grpcurl matrix passes via `tests/fake_e2e.sh` (hardware T5/T7 still pending)
+- [x] Phase 4: all 10 RPCs implemented; T5 grpcurl matrix passes via `tests/fake_e2e.sh` and on real hardware (20/20); T7 soak passed
 - [ ] Phase 5: Web UI (monitor + bank management) over grpc-web, same port
 - [x] AGENTS.md "Serve Mode TODO" replaced with actual status
 
