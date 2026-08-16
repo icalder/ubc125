@@ -38,6 +38,26 @@ The server enables `accept_http1`, a permissive CORS layer, and per-service `Grp
 
 A vanilla-ESM browser console (no framework, no build step) in [web/](./web/README.md).  It mimics the terminal console: Monitor view (scanner info, live amber scan box from the `GetStatus` stream, tappable bank toggles, Scan/Hold) plus ten Bank views (50-row channel table, tap-to-select cursor, edit modal, delete confirm).  Every action works by key *and* by pointer/touch; the layout is responsive from 390 px phones to desktop.  `web/dist` is committed and embedded — the Nix build stays node-free.  Browser E2E scripts live in [tests/web/](./tests/web_e2e.md).
 
+### Testing the Web UI
+
+Two layers (details in [web/README.md](./web/README.md) and [tests/web_e2e.md](./tests/web_e2e.md)):
+
+1. **Unit tests** — pure client logic (`freq.js`, bank labels/ranges/cursor math, backoff schedule), no browser or server needed:
+
+   ```sh
+   cd web && node --test dist/tests/*.test.js
+   ```
+
+2. **Browser E2E** — scripted CDP sessions against a *fake scanner* (W5; `tests/fake_scanner.py` on a socat pty pair) or the real hardware (W6). The fake stack is started with `bash tests/ubc125_stack.sh` (idempotent; self-provisions `socat` via `nix-shell`; serves on `127.0.0.1:50051`). The browser must be Edge launched by the **browser-tools skill** (`browser-start.js`, CDP on `:9222`) — the E2E scripts connect to it with `puppeteer-core` imported from that skill's `node_modules`; nothing in the repo installs a browser. Then:
+
+   ```sh
+   bash tests/ubc125_stack.sh                 # fake scanner + serve (W5)
+   node tests/web/web_pointer_test.mjs        # 1280x720 pointer path (26 checks)
+   node tests/web/web_hiccup_phone_test.mjs   # offline banner + 390x844 phone (10 checks)
+   ```
+
+   `web_hiccup_phone_test.mjs` kills and restarts the fake stack itself. W6 (`tests/web/web_hw_test.mjs`) runs the same list against `serve --device /dev/ttyACM0` with round-trip-only writes; current pass counts are recorded in [tests/web_e2e.md](./tests/web_e2e.md).
+
 ### Trying it with grpcurl
 
 ```sh
@@ -68,7 +88,7 @@ UBC125_REGEN=1 cargo build -p ubc125-grpc
 
 ## Testing Scanner commands
 
-`socat` is available and can be used like in the examples below:
+`socat` is available (wrap with `nix-shell -p socat --run` if it is not on the PATH) and can be used like in the examples below:
 
 ```sh
 echo -ne "MDL\r" | socat -t 1 - /dev/ttyACM0,b115200,raw,echo=0 | tr '\r' '\n'
