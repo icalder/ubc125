@@ -14,7 +14,10 @@ use crate::constants::{
     CHANNELS_PER_BANK, MAX_CHANNELS, MAX_LEVEL, NUM_BANKS, POLL_INTERVAL_ACTIVE_MS,
     POLL_INTERVAL_IDLE_MS, POLL_INTERVAL_MS,
 };
-use crate::modes::ModeManager;
+
+/// Max attempts to fetch a channel before giving up on it.
+const MAX_FETCH_ATTEMPTS: u8 = 3;
+use crate::modes::Mode;
 use crate::scanner::ScannerClient;
 use crate::types::{BankMask, Channel, ChannelIndex, Frequency, Modulation, ScanStatus};
 
@@ -82,8 +85,11 @@ pub struct App {
     pub(crate) tabs: Vec<String>,
     pub(crate) selected_tab: usize,
     pub(crate) channels: Vec<Option<Channel>>,
-    pub(crate) fetch_queue: VecDeque<u32>,
-    mode_manager: ModeManager,
+    /// Pending channel fetches as (index, attempts so far).
+    pub(crate) fetch_queue: VecDeque<(u32, u8)>,
+
+    /// Cached copy of the scanner mode (synced from the client each loop).
+    pub(crate) in_prg_mode: bool,
     pub(crate) banks: BankMask,
     pub(crate) input_mode: InputMode,
     pub(crate) table_state: TableState,
@@ -97,42 +103,23 @@ impl App {
             tabs.push(format!("Bank {}", i));
         }
 
-        let model = client
-            .send_command("MDL")
-            .unwrap_or_else(|e| format!("Err: {}", e));
+        let model = client.get_model().unwrap_or_else(|e| format!("Err: {e}"));
         let version = client
-            .send_command("VER")
-            .unwrap_or_else(|e| format!("Err: {}", e));
+            .get_firmware_version()
+            .unwrap_or_else(|e| format!("Err: {e}"));
         let volume = client
             .get_volume()
-            .unwrap_or_else(|e| format!("Err: {}", e));
+            .unwrap_or_else(|e| format!("Err: {e}"));
         let squelch = client
             .get_squelch()
-            .unwrap_or_else(|e| format!("Err: {}", e));
+            .unwrap_or_else(|e| format!("Err: {e}"));
 
-        // Fetch initial bank status via ModeManager.
-        // Only query SCG if we successfully entered program mode.
-        // Capture any initialization errors for display in the status bar.
-        let mut mode_mgr = ModeManager::new();
-        let mut init_error: Option<String> = None;
-        let scg_resp = if mode_mgr.ensure_program(client).is_ok() {
-            let resp = match client.send_command("SCG") {
-                Ok(r) => r,
-                Err(e) => {
-                    init_error = Some(format!("Failed to read bank status: {}", e));
-                    String::new()
-                }
-            };
-            if let Err(e) = mode_mgr.ensure_monitor(client) {
-                init_error = Some(format!("Failed to return to monitor mode: {}", e));
-            }
-            resp
-        } else {
-            init_error = Some("Failed to enter program mode for bank status".to_string());
-            String::new()
+        // Fetch initial bank status. Capture any initialization errors for
+        // display in the status bar.
+        let (banks, init_error) = match client.get_banks() {
+            Ok(banks) => (banks, None),
+            Err(e) => (BankMask::new(), Some(format!("Failed to read bank status: {e}"))),
         };
-
-        let banks = BankMask::from_scanner_response(&scg_resp);
 
         Self {
             model,
@@ -145,7 +132,7 @@ impl App {
             selected_tab: 0,
             channels: vec![None; (MAX_CHANNELS + 1) as usize],
             fetch_queue: VecDeque::new(),
-            mode_manager: mode_mgr,
+            in_prg_mode: false,
             banks,
             input_mode: InputMode::Normal,
             table_state: TableState::default().with_selected(Some(0)),
@@ -196,27 +183,10 @@ impl App {
         let end_idx = bank * CHANNELS_PER_BANK;
 
         for i in start_idx..=end_idx {
-            if self.channels[i as usize].is_none() && !self.fetch_queue.contains(&i) {
-                self.fetch_queue.push_back(i);
+            let queued = self.fetch_queue.iter().any(|(q, _)| *q == i);
+            if self.channels[i as usize].is_none() && !queued {
+                self.fetch_queue.push_back((i, 1));
             }
-        }
-    }
-
-    /// Update a channel from a CIN response.
-    fn update_channel(&mut self, response: &str) -> bool {
-        if let Some(channel) = Channel::parse_cin(response) {
-            let idx = channel.index.get() as usize;
-            self.channels[idx] = Some(channel);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Update scan status from a GLG response.
-    fn update_scan_status(&mut self, response: &str) {
-        if let Some(status) = ScanStatus::parse_glg(response) {
-            self.scan_status = status;
         }
     }
 
@@ -232,7 +202,7 @@ impl App {
 
     /// Check if in PRG mode (for renderer status bar).
     pub(crate) fn is_in_prg_mode(&self) -> bool {
-        self.mode_manager.is_prg()
+        self.in_prg_mode
     }
 }
 
@@ -249,39 +219,48 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_poll = Instant::now();
 
     'main: loop {
-        // Mode Management via ModeManager
-        if app.selected_tab > 0 && !app.is_in_prg_mode() {
-            if let Err(e) = app.mode_manager.ensure_program(&mut client) {
-                app.error = Some(format!("Failed to enter program mode: {}", e));
+        // Mode management: bank tabs need program mode, monitor tab needs
+        // monitor mode.
+        app.in_prg_mode = client.mode() == Mode::Program;
+        if app.selected_tab > 0 && !app.in_prg_mode {
+            if let Err(e) = client.ensure_program() {
+                app.error = Some(format!("Failed to enter program mode: {e}"));
             }
-        } else if app.selected_tab == 0 && app.is_in_prg_mode() {
-            match app.mode_manager.ensure_monitor(&mut client) {
+        } else if app.selected_tab == 0 && app.in_prg_mode {
+            match client.ensure_monitor() {
                 Ok(()) => {
                     app.fetch_queue.clear();
                 }
                 Err(e) => {
-                    app.error = Some(format!("Failed to return to monitor mode: {}", e));
+                    app.error = Some(format!("Failed to return to monitor mode: {e}"));
                 }
             }
         }
+        app.in_prg_mode = client.mode() == Mode::Program;
 
         // Fetch Logic
         if app.is_in_prg_mode() {
-            if let Some(idx) = app.fetch_queue.pop_front() {
-                let resp = client
-                    .send_command(&format!("CIN,{}", idx))
-                    .unwrap_or_else(|e| format!("Err: {}", e));
-                if !app.update_channel(&resp) {
-                    app.fetch_queue.push_back(idx);
+            if let Some((idx, attempts)) = app.fetch_queue.pop_front() {
+                match client.get_channel(idx) {
+                    Ok(channel) => app.channels[idx as usize] = Some(channel),
+                    Err(e) => {
+                        tracing::warn!("fetch channel {idx} failed (attempt {attempts}): {e}");
+                        if attempts < MAX_FETCH_ATTEMPTS {
+                            app.fetch_queue.push_back((idx, attempts + 1));
+                        } else {
+                            app.error = Some(format!("Failed to load channel {idx}"));
+                        }
+                    }
                 }
             }
         } else if app.selected_tab == 0
             && last_poll.elapsed() >= Duration::from_millis(POLL_INTERVAL_MS)
         {
-            let resp = client
-                .send_command("GLG")
-                .unwrap_or_else(|e| format!("Err: {}", e));
-            app.update_scan_status(&resp);
+            match client.get_status() {
+                Ok(status) => app.scan_status = status,
+                // Keep the last good status on transient errors.
+                Err(e) => tracing::warn!("status poll failed: {e}"),
+            }
             last_poll = Instant::now();
         }
 
@@ -301,6 +280,9 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                 break 'main;
             }
         }
+        // Refresh the cached mode for the next frame (key handlers may have
+        // toggled program mode).
+        app.in_prg_mode = client.mode() == Mode::Program;
     }
 
     disable_raw_mode()?;
@@ -362,7 +344,7 @@ fn handle_normal(app: &mut App, client: &mut ScannerClient, key: KeyEvent, idx: 
                 active_field: EditField::Frequency,
             });
         }
-        KeyCode::Char('s') if app.selected_tab == 0 && client.send_command("KEY,S,P").is_err() => {
+        KeyCode::Char('s') if app.selected_tab == 0 && client.start_scan().is_err() => {
             app.error = Some("Failed to start scan".to_string());
         }
         KeyCode::Char('l') if app.selected_tab == 0 => {
@@ -373,7 +355,7 @@ fn handle_normal(app: &mut App, client: &mut ScannerClient, key: KeyEvent, idx: 
             app.level_input.clear();
             app.input_mode = InputMode::SetLevel(LevelKind::Volume);
         }
-        KeyCode::Char('h') if app.selected_tab == 0 && client.send_command("KEY,H,P").is_err() => {
+        KeyCode::Char('h') if app.selected_tab == 0 && client.hold_scan().is_err() => {
             app.error = Some("Failed to hold scan".to_string());
         }
         KeyCode::Char(c) if app.selected_tab == 0 && c.is_ascii_digit() => {
@@ -381,18 +363,10 @@ fn handle_normal(app: &mut App, client: &mut ScannerClient, key: KeyEvent, idx: 
                 let bank = if digit == 0 { NUM_BANKS as u32 } else { digit };
                 let mut new_mask = app.banks.clone();
                 new_mask.toggle(bank);
-                let scg_cmd = new_mask.to_scanner_command();
-                if app.mode_manager.ensure_program(client).is_ok() {
-                    if client.send_command(&scg_cmd).is_ok() {
-                        app.banks = new_mask;
-                    } else {
-                        app.error = Some("Failed to update bank mask".to_string());
-                    }
-                    if let Err(e) = app.mode_manager.ensure_monitor(client) {
-                        app.error = Some(format!("Failed to return to monitor mode: {}", e));
-                    }
+                if client.set_banks(&new_mask).is_ok() {
+                    app.banks = new_mask;
                 } else {
-                    app.error = Some("Failed to enter program mode".to_string());
+                    app.error = Some("Failed to update bank mask".to_string());
                 }
             }
         }
@@ -409,12 +383,12 @@ fn handle_confirm_delete(
 ) -> bool {
     match key.code {
         KeyCode::Char('y') => {
-            let cmd = format!("DCH,{}", idx);
-            if client.send_command(&cmd).is_ok() {
-                app.channels[idx as usize] = None;
-                app.fetch_queue.push_back(idx);
-            } else {
-                app.error = Some("Failed to delete channel".to_string());
+            match client.delete_channel(idx) {
+                Ok(()) => {
+                    app.channels[idx as usize] = None;
+                    app.fetch_queue.push_back((idx, 1));
+                }
+                Err(e) => app.error = Some(format!("Failed to delete channel: {e}")),
             }
             app.input_mode = InputMode::Normal;
         }
@@ -499,21 +473,17 @@ fn handle_editing(
         KeyCode::Enter => {
             // Validate user input before sending to the scanner.
             if let Some(freq) = Frequency::from_user_input(&edit_state.frequency) {
-                let cmd = format!(
-                    "CIN,{},{},{},AM,0,0,0,0",
-                    idx,
-                    edit_state.name,
-                    freq.to_raw()
-                );
-                if client.send_command(&cmd).is_ok() {
-                    app.channels[idx as usize] = Some(Channel {
-                        index: ChannelIndex::new(idx).unwrap(),
-                        name: edit_state.name.clone(),
-                        frequency: freq,
-                        modulation: Modulation::Am,
-                    });
-                } else {
-                    app.error = Some("Failed to update channel".to_string());
+                let channel = Channel {
+                    index: ChannelIndex::new(idx).unwrap(),
+                    name: edit_state.name.clone(),
+                    frequency: freq,
+                    // The edit flow has no modulation field yet; AM is the
+                    // scanner default.
+                    modulation: Modulation::Am,
+                };
+                match client.set_channel(&channel) {
+                    Ok(()) => app.channels[idx as usize] = Some(channel),
+                    Err(e) => app.error = Some(format!("Failed to update channel: {e}")),
                 }
             } else {
                 app.error = Some("Invalid frequency input".to_string());

@@ -211,6 +211,16 @@ impl BankMask {
         Self([true; NUM_BANKS])
     }
 
+    /// Build a mask from bank enabled states (index 0 = Bank 1).
+    /// Fewer than 10 states leave the remaining banks disabled.
+    pub fn from_states(states: impl IntoIterator<Item = bool>) -> Self {
+        let mut banks = [false; NUM_BANKS];
+        for (i, enabled) in states.into_iter().enumerate().take(NUM_BANKS) {
+            banks[i] = enabled;
+        }
+        Self(banks)
+    }
+
     /// Parse from an SCG response string (e.g. "SCG,0101010101").
     /// Strips the "SCG," prefix if present.
     /// `0` = enabled (valid), `1` = disabled (locked out).
@@ -572,6 +582,24 @@ mod tests {
     }
 
     // ---- BankMask ----
+
+    #[test]
+    fn bank_mask_from_states() {
+        let mask = BankMask::from_states([
+            true, false, true, false, true, false, true, false, true, false,
+        ]);
+        assert!(mask.is_enabled(1));
+        assert!(!mask.is_enabled(2));
+        assert!(mask.is_enabled(9));
+        assert!(!mask.is_enabled(10));
+    }
+
+    #[test]
+    fn bank_mask_from_states_short_input_disables_rest() {
+        let mask = BankMask::from_states([true]);
+        assert!(mask.is_enabled(1));
+        assert!(!mask.is_enabled(2));
+    }
 
     #[test]
     fn bank_mask_default_all_enabled() {

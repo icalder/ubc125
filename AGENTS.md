@@ -28,13 +28,35 @@ Code for the console mode is in [console.rs](./src/cmd/console.rs).
 
 ## Serve Mode
 
-TODO, this will expose a gRPC interface to the scanner for remote control.  The gRPC service is defined in [services.proto](./lib/grpc/proto/ubc125/v1/services.proto).
+Exposes a gRPC (and gRPC-Web) interface to the scanner for remote control.  The gRPC service is defined in [services.proto](./lib/grpc/proto/ubc125/v1/services.proto).
 
-Code for the serve mode is in [serve.rs](./src/cmd/serve.rs).  The gRPC handler methods are defined in [server.rs](./src/server.rs).  Some are stubbed pending full implementation.
+Code for the serve mode is in [serve.rs](./src/cmd/serve.rs).  The gRPC handler methods are defined in [server.rs](./src/server.rs).  `SystemInfoService` and `GetAudioSettings` are implemented; the remaining `ScannerControlService` RPCs are stubbed pending full implementation (see [PLAN.md](./PLAN.md)).
+
+The server enables `accept_http1`, a permissive CORS layer, and `GrpcWebLayer`, so browsers can talk to it directly over grpc-web.
+
+### Trying it with grpcurl
+
+```sh
+grpcurl -plaintext localhost:50051 ubc125.v1.SystemInfoService/GetModelInfo
+grpcurl -plaintext localhost:50051 ubc125.v1.SystemInfoService/GetFirmwareVersion
+```
+
+## gRPC code generation
+
+Generated prost/tonic code is committed in [lib/grpc/rust-gen/src/proto](./lib/grpc/rust-gen/src/proto) so the package builds without a protobuf toolchain.  `build.rs` only produces the file descriptor set (for reflection).  After changing the `.proto` files, regenerate and commit:
+
+```sh
+UBC125_REGEN=1 cargo build -p ubc125-grpc
+```
 
 ## Architecture
 
-`ScannerClient` in [scanner.rs](./src/scanner.rs) will contain all code for serial port communications with the scanner.  It is used by both the console and gRPC server.  
+`ScannerClient` in [scanner.rs](./src/scanner.rs) is the single command layer for the scanner, used by both the console and the gRPC server.  It exposes typed operations (`get_status`, `get_banks`, `set_banks`, `get_channel`, `set_channel`, `delete_channel`, `start_scan`, `hold_scan`, ...) that validate responses and manage the scanner's program mode (PRG/EPG) internally.  `send_command` remains as a raw escape hatch.
+
+- Byte-level I/O goes through the `Transport` trait (`SerialTransport` in production); `ScannerClient::with_transport` accepts a mock for tests.
+- Communication/validation failures surface as `ScannerError`; the gRPC server maps it to status codes (`invalid_argument` / `unavailable` / `internal`).
+- Scanner response parsing (GLG, CIN, SCG) and domain types (`Frequency`, `Channel`, `ChannelIndex`, `BankMask`, `ScanStatus`) live in [types.rs](./src/types.rs).
+- The gRPC server shares one client behind `Arc<Mutex<ScannerClient>>`; blocking serial I/O runs in `spawn_blocking`.
 
 ## Documentation
 

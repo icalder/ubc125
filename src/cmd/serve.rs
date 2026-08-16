@@ -1,7 +1,6 @@
 use crate::scanner::ScannerClient;
 use crate::server;
 use clap::Args;
-use std::sync::{Arc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 use ubc125_grpc::ubc125::v1::scanner_control_service_server::ScannerControlServiceServer;
 use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoServiceServer;
@@ -14,18 +13,13 @@ pub struct ServeArgs {
     pub device: String,
 }
 
-// grpcurl -plaintext localhost:50051 ubc125.v1.SystemInfoService/GetModelInfo
-// grpcurl -plaintext localhost:50051 ubc125.v1.SystemInfoService/GetFirmwareVersion
-
 pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let reflection_service = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(ubc125_grpc::ubc125::v1::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
     let client = ScannerClient::new(&args.device)?;
-    let scanner_server = server::ScannerServer {
-        client: Arc::new(Mutex::new(client)),
-    };
+    let scanner_server = server::ScannerServer::new(client);
 
     tracing::info!("Starting server at {}", args.server_addr);
     tonic::transport::Server::builder()

@@ -3,14 +3,18 @@ name = "ubc125"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["lib/grpc/rust-gen"]
+
 [dependencies]
 clap = { version = "4.6.4", features = ["derive", "env"] }
 crossterm = "0.29.0"
 ratatui = "0.30.2"
 serialport = { version = "4.9.0", default-features = false }
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-stream = "0.1.19"
 tonic = "0.14.6"
 tonic-reflection = "0.14.6"

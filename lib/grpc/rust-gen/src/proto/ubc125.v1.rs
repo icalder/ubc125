@@ -58,6 +58,8 @@ pub struct GetStatusResponse {
     pub signal_detected: bool,
     #[prost(string, tag = "5")]
     pub raw_response: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub modulation: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Channel {

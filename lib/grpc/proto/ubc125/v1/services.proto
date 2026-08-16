@@ -66,6 +66,7 @@ message GetStatusResponse {
   string channel_name = 3;
   bool signal_detected = 4;
   string raw_response = 5;
+  string modulation = 6;
 }
 
 message Channel {
