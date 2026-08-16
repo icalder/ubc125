@@ -57,7 +57,9 @@ body {
   border: 1px solid var(--border);
   background: var(--panel);
   padding: 10px 8px 4px;
-  margin-top: 7px; /* room for the title sitting on the border */
+  /* the title occupies the ~10px above the border, so the margin must
+     exceed that or consecutive cards look stuck together */
+  margin-top: 15px;
 }
 
 /* The tab bar's 44px-tall row needs no extra headroom under the title. */
