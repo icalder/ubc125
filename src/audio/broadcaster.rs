@@ -179,6 +179,35 @@ impl AudioBroadcaster {
         self.start_generation().await
     }
 
+    /// Stop the current capture generation: kill the capture process, await
+    /// its exit (releasing any device it holds), and clear the generation.
+    /// Listeners see a `Failed` event and a closed channel; a later
+    /// `subscribe()` starts fresh. No-op when idle.
+    ///
+    /// Needed because a stopped gRPC listener does not reliably close the
+    /// underlying connection (keep-alive pooling), so the
+    /// last-subscriber stop alone cannot be trusted to release the device.
+    pub async fn stop_capture(&self) {
+        let (gen_id, stop) = {
+            let mut state = self.inner.state();
+            let Some(active) = state.generation.as_mut() else {
+                return;
+            };
+            // Mark stopping so the pump classifies the kill as an
+            // Unavailable exit rather than a failure.
+            active.stopping = true;
+            (active.id, active.stop.clone())
+        };
+        stop.stop().await;
+        // Id-gated: if the generation already ended (and a new one started),
+        // leave the newer one alone.
+        let mut state = self.inner.state();
+        if state.generation.as_ref().is_some_and(|a| a.id == gen_id) {
+            state.generation = None;
+            set_status_locked(&mut state, Status::Unavailable);
+        }
+    }
+
     /// Stop the capture (if any), await the child's exit, and refuse all
     /// further subscribers.
     pub async fn shutdown(&self) {
@@ -708,6 +737,34 @@ mod tests {
         // The generation was cleared: resubscribe starts fresh.
         let sub2 = broadcaster.subscribe().await.expect("resubscribe");
         assert_eq!(source.start_count(), 2);
+        drop(sub2);
+    }
+
+    #[tokio::test]
+    async fn explicit_stop_capture_kills_source_and_restart_works() {
+        let source = continuous_source(1);
+        let broadcaster = AudioBroadcaster::new(source.clone());
+        let sub = broadcaster.subscribe().await.expect("subscribe");
+        let mut rx = sub.resubscribe();
+        next_media(&mut rx).await;
+        broadcaster.stop_capture().await;
+        assert!(
+            wait_until(|| source.stop_count() >= 1).await,
+            "stop not observed"
+        );
+        assert!(
+            wait_until(|| broadcaster.status() == Status::Unavailable).await,
+            "status not Unavailable"
+        );
+        drop(sub);
+        // A new subscriber starts a fresh generation.
+        let sub2 = broadcaster.subscribe().await.expect("resubscribe");
+        let mut rx2 = sub2.resubscribe();
+        assert_eq!(source.start_count(), 2);
+        assert!(matches!(
+            next_event(&mut rx2).await,
+            AudioEvent::Init(_, _)
+        ));
         drop(sub2);
     }
 

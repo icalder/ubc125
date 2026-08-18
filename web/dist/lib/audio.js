@@ -123,6 +123,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Resolve on the next `event` of `el` (one-shot). */
+function once(el, event) {
+  return new Promise((resolve) =>
+    el.addEventListener(event, resolve, { once: true })
+  );
+}
+
 /**
  * Plays the AudioService.Listen stream into a detached `<audio>` element.
  *
@@ -145,6 +152,7 @@ export class AudioStream {
     this._backoff = INITIAL_BACKOFF;
     this._audio = null;
     this._ms = null;
+    this._msUrl = null; // object URL of the current MediaSource
     this._sb = null;
     this._sbReady = null; // Promise: current SourceBuffer is open
     this._wake = null; // waiter for the next queued chunk
@@ -198,6 +206,13 @@ export class AudioStream {
     this._queue.reset();
     this._teardownAudio();
     this._setState("off");
+    // An aborted fetch keeps the keep-alive TCP connection open, so the
+    // server never notices the client is gone; ask it to stop the capture
+    // explicitly (releases the mic on the Pi). Fire-and-forget: stop must
+    // not hang on the network.
+    this._client
+      .stopCapture({})
+      .catch(() => {});
   }
 
   /** Subscribe loop: reconnect with bounded backoff until stopped. */
@@ -212,7 +227,7 @@ export class AudioStream {
           this._wakeNow();
         }
         throw new Error("audio stream ended");
-      } catch {
+      } catch (e) {
         if (this._stopped || run !== this._run) return;
         this._discardGeneration();
         this._queue.reset();
@@ -236,14 +251,25 @@ export class AudioStream {
         for (;;) {
           if (this._stopped || run !== this._run) return;
           const sb = this._sb;
+          if (!sb) break; // generation discarded; re-check outer state
           if (sb.updating) {
             await once(sb, "updateend");
             continue;
           }
-          this._trimIfNeeded();
+          // A trim issues a remove(); the next pass must wait for its
+          // updateend before appending (concurrent mutation throws).
+          if (this._trimIfNeeded()) continue;
           const data = this._queue.shift();
           if (data) {
-            sb.appendBuffer(data);
+            try {
+              sb.appendBuffer(data);
+            } catch {
+              // MSE rejected the append; drop the generation. The next
+              // init segment starts a fresh one.
+              this._discardGeneration();
+              this._queue.reset();
+              continue;
+            }
             if (
               this.state === "connecting" ||
               this.state === "reconnecting"
@@ -267,7 +293,11 @@ export class AudioStream {
     const ms = new MediaSource();
     this._ms = ms;
     const audio = this._audio;
-    audio.srcObject = ms;
+    // Chromium does not accept a main-thread MediaSource via srcObject
+    // (only MediaStream / worker MediaSourceHandle); the object-URL form
+    // is the supported attachment.
+    this._msUrl = URL.createObjectURL(ms);
+    audio.src = this._msUrl;
     audio.play().catch(() => {}); // gesture allowance from play()
     let resolveOpen;
     const promise = new Promise((resolve) => {
@@ -287,10 +317,12 @@ export class AudioStream {
   /** Discard the current MediaSource/SourceBuffer (if any). */
   _discardGeneration() {
     const ms = this._ms;
+    const url = this._msUrl;
     const ready = this._sbReady;
     this._ms = null;
     this._sb = null;
     this._sbReady = null;
+    this._msUrl = null;
     if (ready) ready.resolve();
     if (ms && ms.readyState !== "closed") {
       try {
@@ -299,6 +331,7 @@ export class AudioStream {
         // Already closing; nothing to release.
       }
     }
+    if (url) URL.revokeObjectURL(url);
   }
 
   /** Pause and detach the audio element. */
@@ -309,7 +342,7 @@ export class AudioStream {
     this._wakeNow();
     if (audio) {
       audio.pause();
-      audio.srcObject = null;
+      audio.removeAttribute("src");
     }
   }
 
@@ -317,24 +350,29 @@ export class AudioStream {
    * Keep the buffer near the playhead: drop the old head (~3 s behind) and,
    * for faster-than-real-time sources, cap the future tail (~10 s ahead) so
    * the SourceBuffer cannot bloat and stall the main thread.
+   *
+   * @returns {boolean} true when a remove() was issued (the caller must
+   *   wait for updateend before appending).
    */
   _trimIfNeeded() {
     const sb = this._sb;
     const audio = this._audio;
-    if (!sb || !audio || sb.updating || sb.buffered.length === 0) return;
-    if (performance.now() - this._lastTrim < 2000) return;
+    if (!sb || !audio || sb.updating || sb.buffered.length === 0) return false;
+    if (performance.now() - this._lastTrim < 2000) return false;
     this._lastTrim = performance.now();
     const head = sb.buffered.start(0);
     const tail = sb.buffered.end(0);
     const removeHeadEnd = Math.max(head, audio.currentTime - 3);
     if (removeHeadEnd > head) {
       sb.remove(head, Math.min(removeHeadEnd, tail));
-      return; // remove() sets updating; one range per pass
+      return true; // one range per pass
     }
     const tailLimit = audio.currentTime + 10;
     if (tail > tailLimit) {
       sb.remove(Math.max(head, tailLimit - 3), tail);
+      return true;
     }
+    return false;
   }
 
   /** Wait until a chunk is queued (or the run is torn down). */

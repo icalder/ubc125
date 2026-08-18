@@ -9,6 +9,7 @@ service SystemInfoService {
 
 service AudioService {
   rpc Listen (SubscribeAudioRequest) returns (stream AudioChunk);
+  rpc StopCapture (StopCaptureRequest) returns (StopCaptureResponse);
 }
 
 service ScannerControlService {
@@ -50,6 +51,12 @@ message AudioChunk {
   int64 timestamp_ms = 2;
   bool init_segment = 3;
 }
+
+// Stop the current capture generation: the capture process is killed and
+// the device (e.g. ALSA) is released. Listeners see their stream end.
+message StopCaptureRequest {}
+
+message StopCaptureResponse {}
 
 message StartScanRequest {}
 

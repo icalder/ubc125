@@ -2,11 +2,14 @@
 //
 // Two phases against the fake-scanner stack with D1 audio sources:
 //
-//   A. Deterministic/offline: UBC125_AUDIO_CMD="cat /tmp/cap.webm" (a finite
-//      WebM/Opus file). Play -> connecting -> playing; file ends -> the
-//      generation ends cleanly -> reconnecting; the next generation replays
-//      from the top (fresh init, fresh MediaSource) -> playing again. Stop
-//      releases the source process.
+//   A. Deterministic/offline: UBC125_AUDIO_CMD = tests/paced_file.py over
+//      /tmp/cap.webm (a finite WebM/Opus file, streamed over ~4 s — a bare
+//      `cat` would outpace the 64-slot broadcast channel and the stream
+//      would die with Lagged before the first chunk). Play -> connecting
+//      -> playing; file ends -> the generation ends cleanly ->
+//      reconnecting; the next generation replays from the top (fresh init,
+//      fresh MediaSource) -> playing again. Stop releases the source
+//      process.
 //
 //   B. Continuous + throttled client: UBC125_AUDIO_CMD = ffmpeg lavfi sine
 //      (faster than real time, so a slow client cannot keep up). With a
@@ -85,12 +88,25 @@ const pgrep = (pattern) =>
 // 60 s of tone (same shape as the Pi capture; the file streams into the
 // server in a second or two, long enough for "playing" to be observable,
 // then ends -> exercises the reconnect/replay cycle).
+//
+// The file must be the exact `pipe:1` byte stream: written through a pipe,
+// ffmpeg cannot seek back, so the Segment element keeps its unknown size
+// (a finite Segment size — what a seekable file output produces — is
+// rejected by the segmenter and by Chrome's MSE alike).
 execSync(
-  "test -s /tmp/cap.webm || ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i sine=f=440:duration=60 -ar 16000 -ac 1 -c:a libopus -f webm -cluster_time_limit 200 /tmp/cap.webm",
-  { stdio: "inherit" },
+  'rm -f /tmp/cap.webm; ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i sine=f=440:duration=60 -ar 16000 -ac 1 -c:a libopus -f webm -cluster_time_limit 200 pipe:1 > /tmp/cap.webm',
+  { stdio: "inherit", shell: "/bin/bash" },
 );
-console.log("starting stack (file audio source)...");
-execSync(`UBC125_AUDIO_CMD="cat /tmp/cap.webm" bash ${stack}`, { timeout: 60000 });
+// Pace the file over ~4 s: `cat` would dump it in milliseconds and the
+// 64-slot broadcast channel would overflow before the client's first poll
+// (Lagged before the first chunk; the stream dies with zero data). Paced,
+// the faster-than-real-time stream is slow enough to keep up, and it ends
+// well inside the wait windows below.
+console.log("starting stack (paced file audio source)...");
+execSync(
+  `UBC125_AUDIO_CMD="python3 ${root}/tests/paced_file.py /tmp/cap.webm 4" bash ${stack}`,
+  { timeout: 60000 },
+);
 
 await p.goto("http://127.0.0.1:50051/", { waitUntil: "networkidle2" });
 await sleep(1500);
@@ -122,7 +138,10 @@ ok(await clickBtn("x: Stop"), "Stop clicked");
 const seenStop = await watchAudio("off", 5000);
 ok(seenStop.includes("off"), `stop -> off (saw: ${seenStop.join(" -> ")})`);
 await sleep(500);
-ok(pgrep("cap\\.webm") === "", "no leftover audio source process after Stop");
+ok(
+  pgrep("paced_file[.]py") === "",
+  "no leftover audio source process after Stop"
+);
 
 // -- phase B: continuous source, throttled client ----------------------------
 
@@ -160,7 +179,9 @@ ok(
 ok(await clickBtn("x: Stop"), "Stop clicked (unthrottled)");
 await watchAudio("off", 5000);
 await sleep(500);
-ok(pgrep("sine=f=440") === "", "no leftover ffmpeg after Stop");
+// Bracket trick: the pattern must not appear literally in the command line
+// of the shell execSync spawns, or pgrep matches that shell itself.
+ok(pgrep("sine=f=[4]40") === "", "no leftover ffmpeg after Stop");
 
 await p.close();
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -21,7 +21,10 @@ const AUDIO_MAX_MESSAGE_SIZE: usize = 64 * 1024;
 pub struct ServeArgs {
     #[arg(short, long, default_value_t = String::from("127.0.0.1:50051"))]
     pub server_addr: String,
-    #[arg(short, long, default_value_t = String::from("/dev/ttyACM0"))]
+    // No short flag: `-d` is reserved for the global debug flag (an
+    // automatic `-d` here would shadow it and break "Use -d for debug
+    // logging").
+    #[arg(long, default_value_t = String::from("/dev/ttyACM0"))]
     pub device: String,
     /// ALSA capture device for the audio pipeline (default is the Pi's USB
     /// mic, card 2).

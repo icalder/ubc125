@@ -55,6 +55,28 @@ install):
   → save → verified via `GetChannel`; bank-1 toggle off/on round-trip
   (state restored); all values left as found.
 
+- `web_audio_test.mjs` (W5, audio over gRPC — run under
+  `nix-shell -p socat ffmpeg --run 'node tests/web/web_audio_test.mjs'`;
+  ~2 min). The script (re)starts the stack itself for each phase
+  (`bash tests/ubc125_stack.sh` with `UBC125_AUDIO_CMD` set):
+  1. Phase A — deterministic file: generates `/tmp/cap.webm` (60 s lavfi
+     sine) if missing; stack runs `python3 tests/paced_file.py
+     /tmp/cap.webm 4` (paced replay — raw `cat` outpaces the 48 KiB
+     broadcast queue and the stream backpressure-errors before playback).
+     audio defaults `off` (Play enabled, Stop disabled) → Play →
+     `playing` → file ends → `reconnecting` → generation replays →
+     `playing` again (late/reconnect clients get a fresh init) → Stop →
+     `off`, capture process tree gone
+  2. Phase B — continuous + throttled: stack runs the D1 sine command;
+     `emulateNetworkConditions` 64 KiB/s download → broadcast lag → stream
+     error → `reconnecting` observed (never `unavailable`) → unthrottle →
+     `playing` → Stop, no leftover `ffmpeg`
+  3. Regression: `web_pointer_test.mjs` 26/26 and
+     `web_hiccup_phone_test.mjs` 10/10 re-run green in the same session
+     (both now open a fresh tab like the audio test — a stale-tab reuse
+     intermittently dropped typed input; see `AUDIO-IMPL.md` 8.4
+     findings).
+
 ## Results
 
 - 2026-08-16: W5 pointer path **23/23 pass** at 1280×720; offline banner
@@ -65,3 +87,7 @@ install):
   checks **10/10 pass** (stack script moved to `tests/ubc125_stack.sh`).
 - 2026-08-16: W6 hardware pass **25/25 pass** (real scanner, round-trip
   writes only; channel 63 verified restored via grpcurl `GetChannel`).
+- 2026-08-18 (audio): W5 audio path **18/18 pass** (Phase A file + Phase B
+  continuous/throttled; Edge 151, CDP :9222). Same session: W5 pointer path
+  **26/26 pass**, offline banner + 390×844 checks **10/10 pass** (after
+  switching all W5/W6 scripts to fresh tabs).

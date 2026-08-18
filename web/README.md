@@ -14,10 +14,12 @@ web/
     theme.css      # the whole look: palette, boxes, tab bar, table, modals
     lib/client.js  # connect-web (grpc-web) clients — the only transport code
     lib/freq.js    # pure frequency helpers (mirrors src/types.rs)
+    lib/audio.js   # AudioStream: gRPC Listen → MediaSource playback (see Audio)
+    lib/backoff.js # bounded exponential backoff (audio reconnect)
     components/    # box, tabbar, helpbar, modal (titled ratatui-style boxes)
     views/         # monitor.js, bank.js — one module per view
     proto/         # generated protobuf-es JS (committed)
-    tests/         # node --test unit tests for the pure logic
+    tests/         # node --test unit tests for the pure logic (freq, bank, backoff, audio)
   node_modules/    # dev-only (protoc-gen-es for codegen); not used at runtime
   package.json
 ```
@@ -62,10 +64,38 @@ so web changes only need a page reload — no rebuild, no restart.
 cd web && node --test dist/tests/*.test.js
 ```
 
-Covers the pure logic (`freq.js`): frequency parsing/normalization and
-display formatting. Browser-level verification is scripted in
-`tests/web_e2e.md` (run with the browser-tools skill against the fake
+31 tests cover the pure logic (`freq.js`: frequency parsing/normalization
+and display formatting; bank labels/ranges/cursor math; the backoff
+schedule; audio chunk bookkeeping). Browser-level verification is scripted
+in `tests/web_e2e.md` (run with the browser-tools skill against the fake
 scanner) — not part of `node --test`.
+
+## Audio
+
+The Monitor view's Play/Stop (`p`/`x`) stream the scanner's audio through
+`AudioStream` (`lib/audio.js`):
+
+- `AudioService/Listen` gRPC stream → WebM/Opus `AudioChunk`s. The first
+  chunk (`initSegment: true`) is the WebM header; each generation (fresh
+  Play, or reconnect) starts a new `MediaSource` + `SourceBuffer`.
+- The `MediaSource` is attached with `audio.src =
+  URL.createObjectURL(mediaSource)` — Chromium/Edge rejects
+  `srcObject = <main-thread MediaSource>` (only `MediaStream` / worker
+  `MediaSourceHandle` are accepted there). The object URL is revoked on
+discard/teardown.
+- Bounded buffering: the append loop drains while `updateend` is pending;
+  trim keeps ~3 s behind the playhead and **caps the tail at ~10 s ahead**
+  (a faster-than-real-time source without the cap wedges the tab). Trim and
+  append must not interleave on one pass (`InvalidStateError`) —
+  `_trimIfNeeded()` reports whether it trimmed and the loop `continue`s.
+- On stream failure the state is `reconnecting` (bounded exponential
+  backoff, `lib/backoff.js`), never `unavailable`, until the stream ends
+  with a terminal error (e.g. capture stopped) — then Stop is re-enabled
+  and the state is `off` after Stop/StopCapture.
+- Stop is explicit: `AudioStream.stop()` fires `StopCapture` (fire-and-
+  forget) because aborting the fetch does not close Chrome's keep-alive
+  socket — server-side the capture would otherwise keep running (and keep
+  holding the ALSA device).
 
 ## Proto codegen
 
@@ -95,6 +125,11 @@ Commit the updated `dist/proto/` (and `lib/grpc/rust-gen/src/proto/`).
   with `fromUserInput()` on receipt, send raw 8-digit strings.
 - `stripPrefix()` removes the scanner's `CMD,` echo from raw responses
   (`MDL,UBC125XLT` → `UBC125XLT`).
+- The stack script runs the **debug** binary, and rust-embed serves
+  `dist/` from disk in debug builds — so `dist/` edits only need a page
+  reload (no rebuild/restart). Rebuild only when Rust code changed
+  (`cargo build` + restart the stack). A release binary embeds the files
+  and needs a rebuild for web changes.
 - Focus events are suppressed while the browser window is unfocused, so
   modal field highlighting is driven explicitly (`setActive`), not by
   focus/blur alone.

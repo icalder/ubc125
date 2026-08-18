@@ -3,7 +3,9 @@ const require = createRequire("/home/itcalde/.pi/agent/skills/browser-tools/pack
 const puppeteer = require("puppeteer-core");
 
 const b = await puppeteer.connect({ browserURL: "http://localhost:9222" });
-const p = (await b.pages()).at(-1);
+// A fresh tab: a previous tab may hold wedged renderer state (e.g. from an
+// interrupted run) and reuse would hang every CDP call.
+const p = await b.newPage();
 await p.setViewport({ width: 1280, height: 720 });
 let pass = 0, fail = 0;
 const ok = (cond, label) => { cond ? pass++ : fail++; console.log(`${cond ? "PASS" : "FAIL"}: ${label}`); };
@@ -120,4 +122,5 @@ ok(await waitFlash("Scan held"), "Hold button flash");
 
 console.log(`\n${pass} pass, ${fail} fail (1280x720)`);
 await p.screenshot({ path: "/tmp/wt-desktop.png" });
+await p.close();
 process.exit(fail ? 1 : 0);

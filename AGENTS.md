@@ -32,11 +32,13 @@ Exposes a gRPC (and gRPC-Web) interface to the scanner for remote control.  The 
 
 Code for the serve mode is in [serve.rs](./src/cmd/serve.rs).  The gRPC handler methods are defined in [server.rs](./src/server.rs).  All RPCs are implemented.
 
+Audio: `AudioService/Listen` streams the scanner's audio as WebM/Opus chunks (first chunk is the WebM header/init segment, then cluster-sized media chunks). The capture (ALSA mic via `ffmpeg`, or `UBC125_AUDIO_CMD` for tests) starts lazily on the first `Listen` and is keyed to that client's id; `AudioService/StopCapture` stops it for that id (a browser fetch abort does not close the TCP connection, so without it the capture would keep holding the audio device). See [AUDIO-PLAN.md](./AUDIO-PLAN.md) / [AUDIO-IMPL.md](./AUDIO-IMPL.md); Rust audio code in [src/audio/](./src/audio/mod.rs).
+
 The server enables `accept_http1`, a permissive CORS layer, and per-service `GrpcWebLayer`s, so browsers can talk to it directly over grpc-web.  On the same port it also serves the web UI: everything that is not a gRPC path falls through to an axum static router over `web/dist` (embedded at compile time with `rust-embed`; see [web.rs](./src/web.rs)).  `GrpcWebLayer` is applied per service (not as a global fallback) because it 400s all non-grpc-web HTTP/1.1.
 
 ### Web UI
 
-A vanilla-ESM browser console (no framework, no build step) in [web/](./web/README.md).  It mimics the terminal console: Monitor view (scanner info, live amber scan box from the `GetStatus` stream, tappable bank toggles, Scan/Hold) plus ten Bank views (50-row channel table, tap-to-select cursor, edit modal, delete confirm).  Every action works by key *and* by pointer/touch; the layout is responsive from 390 px phones to desktop.  `web/dist` is committed and embedded — the Nix build stays node-free.  Browser E2E scripts live in [tests/web/](./tests/web_e2e.md).
+A vanilla-ESM browser console (no framework, no build step) in [web/](./web/README.md).  It mimics the terminal console: Monitor view (scanner info, live amber scan box from the `GetStatus` stream, tappable bank toggles, Scan/Hold, Play/Stop audio with a coloured state label) plus ten Bank views (50-row channel table, tap-to-select cursor, edit modal, delete confirm).  Audio plays through `lib/audio.js` (MediaSource/SourceBuffer, attached via `URL.createObjectURL` — Chromium rejects `srcObject` for main-thread `MediaSource`; bounded buffer, backoff reconnect).  Every action works by key *and* by pointer/touch; the layout is responsive from 390 px phones to desktop.  `web/dist` is committed and embedded — the Nix build stays node-free.  Browser E2E scripts live in [tests/web/](./tests/web_e2e.md).
 
 ### Testing the Web UI
 
@@ -54,6 +56,7 @@ Two layers (details in [web/README.md](./web/README.md) and [tests/web_e2e.md](.
    bash tests/ubc125_stack.sh                 # fake scanner + serve (W5)
    node tests/web/web_pointer_test.mjs        # 1280x720 pointer path (26 checks)
    node tests/web/web_hiccup_phone_test.mjs   # offline banner + 390x844 phone (10 checks)
+   nix-shell -p socat ffmpeg --run 'node tests/web/web_audio_test.mjs'  # audio Play/Stop + throttle (18 checks, ~2 min; manages the stack itself)
    ```
 
    `web_hiccup_phone_test.mjs` kills and restarts the fake stack itself. W6 (`tests/web/web_hw_test.mjs`) runs the same list against `serve --device /dev/ttyACM0` with round-trip-only writes; current pass counts are recorded in [tests/web_e2e.md](./tests/web_e2e.md).
@@ -81,6 +84,7 @@ UBC125_REGEN=1 cargo build -p ubc125-grpc
 - Communication/validation failures surface as `ScannerError`; the gRPC server maps it to status codes (`invalid_argument` / `unavailable` / `internal`).
 - Scanner response parsing (GLG, CIN, SCG) and domain types (`Frequency`, `Channel`, `ChannelIndex`, `BankMask`, `ScanStatus`) live in [types.rs](./src/types.rs).
 - The gRPC server shares one client behind `Arc<Mutex<ScannerClient>>`; blocking serial I/O runs in `spawn_blocking`.
+- Audio: `src/audio/` — `ffmpeg.rs` spawns the capture (ALSA → Opus WebM to stdout; `UBC125_AUDIO_CMD` override), `webm.rs` splits the stream into cluster-sized segments, `broadcaster.rs` fans the segments out to `Listen` subscribers (per-subscriber bounded queue with send timeout; id-gated start/stop so one client's `StopCapture` cannot kill another's).
 
 ## Documentation
 

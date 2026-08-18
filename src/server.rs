@@ -17,6 +17,7 @@ use ubc125_grpc::ubc125::v1::scanner_control_service_server::ScannerControlServi
 use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoService;
 use ubc125_grpc::ubc125::v1::{
     AudioChunk, DeleteChannelRequest, DeleteChannelResponse, GetAudioSettingsRequest,
+    StopCaptureRequest, StopCaptureResponse,
     GetAudioSettingsResponse, GetChannelRequest, GetChannelResponse, GetEnabledBanksRequest,
     GetEnabledBanksResponse, GetFirmwareVersionRequest, GetFirmwareVersionResponse,
     GetModelInfoRequest, GetModelInfoResponse, GetStatusRequest, GetStatusResponse,
@@ -425,6 +426,17 @@ impl AudioService for AudioServer {
             _subscription: subscription,
         };
         Ok(Response::new(Box::pin(stream)))
+    }
+
+    /// Explicit capture stop: a stopped browser listener keeps its
+    /// keep-alive TCP connection open, so the server cannot detect the
+    /// client is gone; the client calls this to release the device.
+    async fn stop_capture(
+        &self,
+        _request: Request<StopCaptureRequest>,
+    ) -> Result<Response<StopCaptureResponse>, Status> {
+        self.broadcaster.stop_capture().await;
+        Ok(Response::new(StopCaptureResponse {}))
     }
 }
 
