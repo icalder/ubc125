@@ -2,8 +2,11 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Re-run the build script when the regen flag changes.
+    // Re-run the build script when the regen flag changes or the protos
+    // change (the descriptor set must track the .proto files, otherwise
+    // reflection serves a stale service list).
     println!("cargo:rerun-if-env-changed=UBC125_REGEN");
+    println!("cargo:rerun-if-changed=../proto/ubc125/v1/services.proto");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     // The generated prost/tonic code is committed under src/proto so the

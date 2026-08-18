@@ -7,6 +7,10 @@ service SystemInfoService {
   rpc GetFirmwareVersion (GetFirmwareVersionRequest) returns (GetFirmwareVersionResponse);
 }
 
+service AudioService {
+  rpc Listen (SubscribeAudioRequest) returns (stream AudioChunk);
+}
+
 service ScannerControlService {
   rpc GetAudioSettings (GetAudioSettingsRequest) returns (GetAudioSettingsResponse);
   rpc StartScan (StartScanRequest) returns (StartScanResponse);
@@ -37,6 +41,14 @@ message GetAudioSettingsRequest {}
 message GetAudioSettingsResponse {
   string volume = 1;
   string squelch = 2;
+}
+
+message SubscribeAudioRequest {}
+
+message AudioChunk {
+  bytes payload = 1;
+  int64 timestamp_ms = 2;
+  bool init_segment = 3;
 }
 
 message StartScanRequest {}

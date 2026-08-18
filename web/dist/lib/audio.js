@@ -1,0 +1,352 @@
+// Audio stream helper for AudioService.Listen.
+//
+// Plays the server's segmented WebM/Opus byte stream (init segment, then
+// cluster chunks) through a MediaSource. The pure logic (state machine,
+// chunk queue) is unit-tested in tests/audio.test.js; AudioStream is the
+// thin browser glue around it. No worker, no new dependencies.
+
+import { INITIAL_BACKOFF, MAX_BACKOFF, nextBackoff } from "./backoff.js";
+
+/** MIME type of the segmented WebM/Opus stream the server sends. */
+export const AUDIO_MIME = 'audio/webm; codecs="opus"';
+
+/** All audio states, in display order. */
+export const AUDIO_STATES = [
+  "off",
+  "connecting",
+  "playing",
+  "reconnecting",
+  "unavailable",
+];
+
+/**
+ * State machine transitions (pure).
+ *
+ * Events:
+ *  - "play":        user pressed Play (only from off).
+ *  - "unsupported": browser cannot play WebM/Opus (on play, from off).
+ *  - "ready":       stream is flowing and the init segment was appended.
+ *  - "error":       stream failed or ended; the helper reconnects.
+ *  - "stop":        user pressed Stop (from any active state).
+ *
+ * Unknown events are no-ops; the current state is returned.
+ */
+export function audioTransition(state, event) {
+  switch (state) {
+    case "off":
+      switch (event) {
+        case "play":
+          return "connecting";
+        case "unsupported":
+          return "unavailable";
+      }
+      return state;
+    case "connecting":
+      switch (event) {
+        case "ready":
+          return "playing";
+        case "error":
+          return "reconnecting";
+        case "stop":
+          return "off";
+      }
+      return state;
+    case "playing":
+      switch (event) {
+        case "error":
+          return "reconnecting";
+        case "stop":
+          return "off";
+      }
+      return state;
+    case "reconnecting":
+      switch (event) {
+        case "ready":
+          return "playing";
+        case "stop":
+          return "off";
+      }
+      return state;
+    case "unavailable":
+      if (event === "stop") return "off";
+      return state;
+  }
+  return state;
+}
+
+/**
+ * FIFO of chunks waiting to be appended to the SourceBuffer.
+ *
+ * Guarantees no media is ever queued before an init segment has been seen
+ * (the server sends exactly one init per generation, always first). An
+ * init also discards pending media from the previous generation, which
+ * belonged to a different MediaSource.
+ */
+export class ChunkQueue {
+  constructor() {
+    this._items = [];
+    this._sawInit = false;
+  }
+
+  /** Push a chunk (`{ initSegment, payload }`). True if it was kept. */
+  push(chunk) {
+    if (chunk.initSegment) {
+      this._items.length = 0;
+      this._sawInit = true;
+      this._items.push(chunk.payload);
+      return true;
+    }
+    if (!this._sawInit) return false;
+    this._items.push(chunk.payload);
+    return true;
+  }
+
+  /** Take the oldest queued payload, or undefined when empty. */
+  shift() {
+    return this._items.shift();
+  }
+
+  get size() {
+    return this._items.length;
+  }
+
+  /** Discard everything (used on stop / generation reset). */
+  reset() {
+    this._items.length = 0;
+    this._sawInit = false;
+  }
+}
+
+// -- browser glue ------------------------------------------------------------
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Plays the AudioService.Listen stream into a detached `<audio>` element.
+ *
+ * States: off -> connecting -> playing, with "reconnecting" on stream
+ * failure (bounded exponential backoff, reusing lib/backoff.js) and
+ * "unavailable" when the browser cannot decode the stream.
+ */
+export class AudioStream {
+  /**
+   * @param {object} client generated AudioService connect client.
+   * @param {object} [opts]
+   * @param {(state: string) => void} [opts.onState] state change callback.
+   */
+  constructor(client, { onState } = {}) {
+    this._client = client;
+    this._onState = onState;
+    this.state = "off";
+    this._queue = new ChunkQueue();
+    this._stopped = true;
+    this._backoff = INITIAL_BACKOFF;
+    this._audio = null;
+    this._ms = null;
+    this._sb = null;
+    this._sbReady = null; // Promise: current SourceBuffer is open
+    this._wake = null; // waiter for the next queued chunk
+    this._run = 0; // run id; stale loops observe a mismatch and exit
+    this._lastTrim = 0;
+  }
+
+  /** Can this browser play WebM/Opus through MediaSource? */
+  static isSupported() {
+    return (
+      typeof MediaSource !== "undefined" &&
+      MediaSource.isTypeSupported(AUDIO_MIME)
+    );
+  }
+
+  _setState(next) {
+    if (next === this.state) return;
+    this.state = next;
+    if (this._onState) this._onState(next);
+  }
+
+  _transition(event) {
+    this._setState(audioTransition(this.state, event));
+  }
+
+  /** Start capture + playback (user gesture; idempotent while active). */
+  async play() {
+    if (this.state !== "off") return;
+    if (!AudioStream.isSupported()) {
+      this._transition("unsupported");
+      return;
+    }
+    this._stopped = false;
+    this._backoff = INITIAL_BACKOFF;
+    // Create and start the element synchronously inside the user gesture
+    // so the autoplay policy allows playback.
+    const audio = new Audio();
+    this._audio = audio;
+    const run = ++this._run;
+    this._setState("connecting");
+    // One drain loop per run; it exits on stop (run mismatch + wake).
+    this._drainLoop(run);
+    await this._loop(run);
+  }
+
+  /** Stop playback and release everything (explicit only). */
+  stop() {
+    if (this.state === "off") return;
+    this._stopped = true;
+    this._run++;
+    this._queue.reset();
+    this._teardownAudio();
+    this._setState("off");
+  }
+
+  /** Subscribe loop: reconnect with bounded backoff until stopped. */
+  async _loop(run) {
+    for (;;) {
+      if (this._stopped || run !== this._run) return;
+      try {
+        for await (const chunk of this._client.listen({})) {
+          if (this._stopped || run !== this._run) return;
+          this._queue.push(chunk);
+          if (chunk.initSegment) this._beginGeneration();
+          this._wakeNow();
+        }
+        throw new Error("audio stream ended");
+      } catch {
+        if (this._stopped || run !== this._run) return;
+        this._discardGeneration();
+        this._queue.reset();
+        this._transition("error");
+        const delay = this._backoff;
+        this._backoff = nextBackoff(this._backoff, MAX_BACKOFF);
+        await sleep(delay);
+      }
+    }
+  }
+
+  /** Append queued payloads to the SourceBuffer until stopped. */
+  async _drainLoop(run) {
+    for (;;) {
+      if (this._stopped || run !== this._run) return;
+      const ready = this._sbReady;
+      if (ready) {
+        await ready.promise;
+        if (this._stopped || run !== this._run) return;
+        if (this._sbReady !== ready) continue; // generation changed
+        for (;;) {
+          if (this._stopped || run !== this._run) return;
+          const sb = this._sb;
+          if (sb.updating) {
+            await once(sb, "updateend");
+            continue;
+          }
+          this._trimIfNeeded();
+          const data = this._queue.shift();
+          if (data) {
+            sb.appendBuffer(data);
+            if (
+              this.state === "connecting" ||
+              this.state === "reconnecting"
+            ) {
+              this._transition("ready");
+            }
+          } else {
+            await this._nextChunk();
+          }
+        }
+      } else {
+        // No generation yet: wait for the init chunk to open one.
+        await this._nextChunk();
+      }
+    }
+  }
+
+  /** Start a fresh MediaSource for a new init segment (generation). */
+  _beginGeneration() {
+    this._discardGeneration();
+    const ms = new MediaSource();
+    this._ms = ms;
+    const audio = this._audio;
+    audio.srcObject = ms;
+    audio.play().catch(() => {}); // gesture allowance from play()
+    let resolveOpen;
+    const promise = new Promise((resolve) => {
+      resolveOpen = resolve;
+    });
+    ms.addEventListener("sourceopen", () => {
+      if (this._ms !== ms) return; // discarded before it opened
+      resolveOpen();
+      this._sb = ms.addSourceBuffer(AUDIO_MIME);
+      this._wakeNow();
+    }, { once: true });
+    // { promise, resolve }: discard resolves a stale promise so a drain
+    // loop waiting on a dead generation is never stranded.
+    this._sbReady = { promise, resolve: resolveOpen };
+  }
+
+  /** Discard the current MediaSource/SourceBuffer (if any). */
+  _discardGeneration() {
+    const ms = this._ms;
+    const ready = this._sbReady;
+    this._ms = null;
+    this._sb = null;
+    this._sbReady = null;
+    if (ready) ready.resolve();
+    if (ms && ms.readyState !== "closed") {
+      try {
+        ms.endOfStream("abort");
+      } catch {
+        // Already closing; nothing to release.
+      }
+    }
+  }
+
+  /** Pause and detach the audio element. */
+  _teardownAudio() {
+    this._discardGeneration();
+    const audio = this._audio;
+    this._audio = null;
+    this._wakeNow();
+    if (audio) {
+      audio.pause();
+      audio.srcObject = null;
+    }
+  }
+
+  /**
+   * Keep the buffer near the playhead: drop the old head (~3 s behind) and,
+   * for faster-than-real-time sources, cap the future tail (~10 s ahead) so
+   * the SourceBuffer cannot bloat and stall the main thread.
+   */
+  _trimIfNeeded() {
+    const sb = this._sb;
+    const audio = this._audio;
+    if (!sb || !audio || sb.updating || sb.buffered.length === 0) return;
+    if (performance.now() - this._lastTrim < 2000) return;
+    this._lastTrim = performance.now();
+    const head = sb.buffered.start(0);
+    const tail = sb.buffered.end(0);
+    const removeHeadEnd = Math.max(head, audio.currentTime - 3);
+    if (removeHeadEnd > head) {
+      sb.remove(head, Math.min(removeHeadEnd, tail));
+      return; // remove() sets updating; one range per pass
+    }
+    const tailLimit = audio.currentTime + 10;
+    if (tail > tailLimit) {
+      sb.remove(Math.max(head, tailLimit - 3), tail);
+    }
+  }
+
+  /** Wait until a chunk is queued (or the run is torn down). */
+  _nextChunk() {
+    return new Promise((resolve) => {
+      this._wake = resolve;
+    });
+  }
+
+  _wakeNow() {
+    const wake = this._wake;
+    this._wake = null;
+    if (wake) wake();
+  }
+}

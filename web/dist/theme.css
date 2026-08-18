@@ -412,3 +412,27 @@ body {
   text-align: center;
   padding: 4px 8px;
 }
+
+/* -- audio state label ------------------------------------------------------ */
+
+.audio-state {
+  font-weight: bold;
+}
+
+.audio-state.audio-off {
+  color: var(--dim);
+}
+
+.audio-state.audio-connecting,
+.audio-state.audio-reconnecting {
+  color: var(--yellow);
+}
+
+.audio-state.audio-playing {
+  color: var(--green);
+}
+
+.audio-state.audio-unavailable,
+.audio-state.audio-not-supported {
+  color: var(--red);
+}

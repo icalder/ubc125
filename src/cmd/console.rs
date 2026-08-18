@@ -107,18 +107,17 @@ impl App {
         let version = client
             .get_firmware_version()
             .unwrap_or_else(|e| format!("Err: {e}"));
-        let volume = client
-            .get_volume()
-            .unwrap_or_else(|e| format!("Err: {e}"));
-        let squelch = client
-            .get_squelch()
-            .unwrap_or_else(|e| format!("Err: {e}"));
+        let volume = client.get_volume().unwrap_or_else(|e| format!("Err: {e}"));
+        let squelch = client.get_squelch().unwrap_or_else(|e| format!("Err: {e}"));
 
         // Fetch initial bank status. Capture any initialization errors for
         // display in the status bar.
         let (banks, init_error) = match client.get_banks() {
             Ok(banks) => (banks, None),
-            Err(e) => (BankMask::new(), Some(format!("Failed to read bank status: {e}"))),
+            Err(e) => (
+                BankMask::new(),
+                Some(format!("Failed to read bank status: {e}")),
+            ),
         };
 
         Self {

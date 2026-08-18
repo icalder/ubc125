@@ -7,6 +7,7 @@ import { INITIAL_BACKOFF, MAX_BACKOFF, nextBackoff } from "./lib/backoff.js";
 import { renderTabs, NUM_TABS } from "./components/tabbar.js";
 import { renderHelp } from "./components/helpbar.js";
 import { renderMonitor } from "./views/monitor.js";
+import { AudioStream } from "./lib/audio.js";
 import { renderBank, CHANNELS_PER_BANK, bankRange } from "./views/bank.js";
 import { openEditModal, openConfirmDelete as showConfirmDelete } from "./components/modal.js";
 
@@ -17,7 +18,9 @@ const MAX_NAME_LEN = 16;
 // ?server=http://host:port overrides the gRPC-Web endpoint (defaults to
 // same origin, which works when served by `ubc125 serve`).
 const serverParam = new URLSearchParams(location.search).get("server");
-const { system, scanner } = createClients(serverParam ?? location.origin);
+const { system, audio: audioClient, scanner } = createClients(
+  serverParam ?? location.origin,
+);
 
 // -- state -----------------------------------------------------------------
 
@@ -31,12 +34,23 @@ const state = {
   cursor: 1, // selected channel index (1-500)
   loadingBank: 0, // bank currently being fetched (0 = none)
   connected: false,
+  audio: "off", // AudioStream state (off|connecting|playing|reconnecting|unavailable)
+  audioSupported: typeof MediaSource !== "undefined" &&
+    MediaSource.isTypeSupported('audio/webm; codecs="opus"'),
   error: null, // persistent error (cleared by next action)
   flash: null, // transient info message
 };
 
 let modal = null; // { kind: "edit" | "delete", ... }
 let flashTimer = 0;
+
+// Audio keeps playing across tab switches; Stop is explicit.
+const audioStream = new AudioStream(audioClient, {
+  onState: (s) => {
+    state.audio = s;
+    render();
+  },
+});
 
 // -- DOM -------------------------------------------------------------------
 
@@ -82,9 +96,12 @@ function render() {
       info: state.info,
       status: state.status,
       banks: state.banks,
+      audio: { state: state.audio, supported: state.audioSupported },
       onScan: () => runScanAction(scanner.startScan({}), "Scan started"),
       onHold: () => runScanAction(scanner.holdScan({}), "Scan held"),
       onToggleBank: (bank) => toggleBank(bank),
+      onAudioPlay: () => audioStream.play(),
+      onAudioStop: () => audioStream.stop(),
     });
   } else {
     const [start] = bankRange(state.tab);
@@ -370,6 +387,12 @@ function onKeydown(e) {
         return;
       case "h":
         runScanAction(scanner.holdScan({}), "Scan held");
+        return;
+      case "p":
+        audioStream.play();
+        return;
+      case "x":
+        audioStream.stop();
         return;
       default:
         if (/^[0-9]$/.test(e.key)) {

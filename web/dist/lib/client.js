@@ -5,6 +5,7 @@ import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import { ConnectError } from "@connectrpc/connect";
 import {
   SystemInfoService,
+  AudioService,
   ScannerControlService,
 } from "../proto/ubc125/v1/services_pb.js";
 
@@ -12,6 +13,7 @@ export function createClients(baseUrl) {
   const transport = createGrpcWebTransport({ baseUrl });
   return {
     system: createClient(SystemInfoService, transport),
+    audio: createClient(AudioService, transport),
     scanner: createClient(ScannerControlService, transport),
   };
 }

@@ -1,22 +1,28 @@
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tonic::{Request, Response, Status};
 
+use crate::audio::{AudioBroadcaster, AudioError, AudioEvent, AudioSubscription};
 use crate::constants::{NUM_BANKS, POLL_INTERVAL_MS};
 use crate::scanner::{ScannerClient, ScannerError};
 use crate::types::{BankMask, Channel, Frequency, Modulation, ScanStatus};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::Stream;
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
+use ubc125_grpc::ubc125::v1::audio_service_server::AudioService;
 use ubc125_grpc::ubc125::v1::scanner_control_service_server::ScannerControlService;
 use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoService;
 use ubc125_grpc::ubc125::v1::{
-    DeleteChannelRequest, DeleteChannelResponse, GetAudioSettingsRequest, GetAudioSettingsResponse,
-    GetChannelRequest, GetChannelResponse, GetEnabledBanksRequest, GetEnabledBanksResponse,
-    GetFirmwareVersionRequest, GetFirmwareVersionResponse, GetModelInfoRequest,
-    GetModelInfoResponse, GetStatusRequest, GetStatusResponse, HoldScanRequest, HoldScanResponse,
-    ListChannelsRequest, ListChannelsResponse, SetChannelRequest, SetChannelResponse,
-    SetEnabledBanksRequest, SetEnabledBanksResponse, StartScanRequest, StartScanResponse,
+    AudioChunk, DeleteChannelRequest, DeleteChannelResponse, GetAudioSettingsRequest,
+    GetAudioSettingsResponse, GetChannelRequest, GetChannelResponse, GetEnabledBanksRequest,
+    GetEnabledBanksResponse, GetFirmwareVersionRequest, GetFirmwareVersionResponse,
+    GetModelInfoRequest, GetModelInfoResponse, GetStatusRequest, GetStatusResponse,
+    HoldScanRequest, HoldScanResponse, ListChannelsRequest, ListChannelsResponse,
+    SetChannelRequest, SetChannelResponse, SetEnabledBanksRequest, SetEnabledBanksResponse,
+    StartScanRequest, StartScanResponse, SubscribeAudioRequest,
 };
 
 /// Domain -> proto conversion for a scan status.
@@ -50,16 +56,13 @@ impl From<Channel> for ubc125_grpc::ubc125::v1::Channel {
 fn channel_from_proto(c: ubc125_grpc::ubc125::v1::Channel) -> Result<Channel, Status> {
     let index = crate::types::ChannelIndex::new(c.index)
         .ok_or_else(|| Status::invalid_argument(format!("invalid channel index: {}", c.index)))?;
-    let frequency = Frequency::from_user_input(&c.frequency).ok_or_else(|| {
-        Status::invalid_argument(format!("invalid frequency: {}", c.frequency))
-    })?;
+    let frequency = Frequency::from_user_input(&c.frequency)
+        .ok_or_else(|| Status::invalid_argument(format!("invalid frequency: {}", c.frequency)))?;
     // Empty modulation defaults to AM (the console edit flow is AM-only).
     let modulation = if c.modulation.is_empty() {
         Modulation::Am
     } else {
-        c.modulation
-            .parse::<Modulation>()
-            .unwrap_or(Modulation::Am)
+        c.modulation.parse::<Modulation>().unwrap_or(Modulation::Am)
     };
     Ok(Channel {
         index,
@@ -272,8 +275,8 @@ impl ScannerControlService for ScannerServer {
         request: Request<GetChannelRequest>,
     ) -> Result<Response<GetChannelResponse>, Status> {
         let index = request.into_inner().index;
-        let channel = with_scanner(self.client.clone(), move |client| client.get_channel(index))
-            .await?;
+        let channel =
+            with_scanner(self.client.clone(), move |client| client.get_channel(index)).await?;
         Ok(Response::new(GetChannelResponse {
             channel: Some(channel.into()),
         }))
@@ -288,7 +291,10 @@ impl ScannerControlService for ScannerServer {
             .channel
             .ok_or_else(|| Status::invalid_argument("channel is required"))?;
         let channel = channel_from_proto(proto_channel)?;
-        with_scanner(self.client.clone(), move |client| client.set_channel(&channel)).await?;
+        with_scanner(self.client.clone(), move |client| {
+            client.set_channel(&channel)
+        })
+        .await?;
         Ok(Response::new(SetChannelResponse {}))
     }
 
@@ -297,7 +303,10 @@ impl ScannerControlService for ScannerServer {
         request: Request<DeleteChannelRequest>,
     ) -> Result<Response<DeleteChannelResponse>, Status> {
         let index = request.into_inner().index;
-        with_scanner(self.client.clone(), move |client| client.delete_channel(index)).await?;
+        with_scanner(self.client.clone(), move |client| {
+            client.delete_channel(index)
+        })
+        .await?;
         Ok(Response::new(DeleteChannelResponse {}))
     }
 
@@ -306,20 +315,139 @@ impl ScannerControlService for ScannerServer {
         request: Request<ListChannelsRequest>,
     ) -> Result<Response<ListChannelsResponse>, Status> {
         let bank = request.into_inner().bank;
-        let channels = with_scanner(self.client.clone(), move |client| client.get_bank_channels(bank))
-            .await?;
+        let channels = with_scanner(self.client.clone(), move |client| {
+            client.get_bank_channels(bank)
+        })
+        .await?;
         Ok(Response::new(ListChannelsResponse {
             channels: channels.into_iter().map(Into::into).collect(),
         }))
     }
 }
 
+/// Map audio errors to gRPC status codes: a shut-down broadcaster or a
+/// capture that cannot run is `unavailable` to the client.
+impl From<AudioError> for Status {
+    fn from(e: AudioError) -> Self {
+        match e {
+            AudioError::Shutdown => Self::unavailable("audio is shut down"),
+            AudioError::Source(s) => Self::unavailable(s.to_string()),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AudioServer {
+    broadcaster: Arc<AudioBroadcaster>,
+}
+
+impl AudioServer {
+    pub fn new(broadcaster: Arc<AudioBroadcaster>) -> Self {
+        Self { broadcaster }
+    }
+}
+
+/// Server-streaming response for `Listen`: the init chunk (cached or from
+/// the channel), then one chunk per WebM cluster until the generation ends.
+struct ListenStream {
+    events: BroadcastStream<AudioEvent>,
+    /// Init chunk owed to this client before any buffered/channel media.
+    pending_init: Option<Vec<u8>>,
+    /// True when the cached init was sent: the channel's (replayed) init is
+    /// a duplicate and is dropped so the client sees exactly one.
+    skip_inits: bool,
+    /// Keeps the subscriber slot (and the capture) alive for the stream's
+    /// lifetime; dropping the stream returns the slot to the broadcaster.
+    _subscription: AudioSubscription,
+}
+
+impl Stream for ListenStream {
+    type Item = Result<AudioChunk, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(payload) = self.pending_init.take() {
+            return Poll::Ready(Some(Ok(AudioChunk {
+                payload,
+                timestamp_ms: 0,
+                init_segment: true,
+            })));
+        }
+        loop {
+            let events = Pin::new(&mut self.events);
+            match events.poll_next(cx) {
+                Poll::Ready(Some(Ok(AudioEvent::Init(payload, ts)))) => {
+                    if self.skip_inits {
+                        continue;
+                    }
+                    return Poll::Ready(Some(Ok(AudioChunk {
+                        payload,
+                        timestamp_ms: ts,
+                        init_segment: true,
+                    })));
+                }
+                Poll::Ready(Some(Ok(AudioEvent::Media(payload, ts)))) => {
+                    return Poll::Ready(Some(Ok(AudioChunk {
+                        payload,
+                        timestamp_ms: ts,
+                        init_segment: false,
+                    })));
+                }
+                // Generation ended; surface the failure and end the stream.
+                Poll::Ready(Some(Ok(AudioEvent::Failed))) => {
+                    return Poll::Ready(Some(Err(Status::unavailable("audio capture ended"))));
+                }
+                Poll::Ready(Some(Err(_))) | Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl AudioService for AudioServer {
+    type ListenStream = Pin<Box<dyn Stream<Item = Result<AudioChunk, Status>> + Send>>;
+
+    async fn listen(
+        &self,
+        _request: Request<SubscribeAudioRequest>,
+    ) -> Result<Response<Self::ListenStream>, Status> {
+        let subscription = self.broadcaster.subscribe().await?;
+        // A join after the init was produced gets the cached copy up front;
+        // the channel's (replayed) init is then a duplicate.
+        let (pending_init, skip_inits) = match subscription.cached_init() {
+            Some(init) => (Some(init.to_vec()), true),
+            None => (None, false),
+        };
+        let stream = ListenStream {
+            events: BroadcastStream::new(subscription.resubscribe()),
+            pending_init,
+            skip_inits,
+            _subscription: subscription,
+        };
+        Ok(Response::new(Box::pin(stream)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scanner::mock::{mock_client, GLG_OK};
-    use tonic::Code;
+    use crate::audio::ffmpeg::FakeSource;
+    use crate::audio::webm::fixtures::build_fixture;
+    use crate::scanner::mock::{GLG_OK, mock_client};
+    use tokio::time::timeout;
     use tokio_stream::StreamExt;
+    use tonic::Code;
+
+    /// A broadcaster over a looping WebM fixture (header once, clusters on).
+    fn audio_test_broadcaster(clusters: usize) -> (Arc<AudioBroadcaster>, Arc<FakeSource>) {
+        let (stream, init) = build_fixture(clusters);
+        let source = Arc::new(
+            FakeSource::new(stream)
+                .with_head(init.len())
+                .with_delay(Duration::from_micros(200)),
+        );
+        (Arc::new(AudioBroadcaster::new(source.clone())), source)
+    }
 
     // -- error mapping (U6) --
 
@@ -495,5 +623,96 @@ mod tests {
         // Exactly the two served polls; no further GLG polls after the
         // pollers stopped.
         assert_eq!(sent, vec!["GLG\r".to_string(); 2]);
+    }
+
+    // -- AudioService::Listen (6.7) --
+
+    async fn listen_first_chunks(server: &AudioServer, n: usize) -> Vec<AudioChunk> {
+        let response = server
+            .listen(Request::new(SubscribeAudioRequest {}))
+            .await
+            .expect("listen must succeed");
+        let mut stream = response.into_inner();
+        let mut chunks = Vec::new();
+        for _ in 0..n {
+            let chunk = timeout(WAIT_AUDIO, stream.next())
+                .await
+                .expect("timed out waiting for chunk")
+                .expect("stream ended early")
+                .expect("chunk error");
+            chunks.push(chunk);
+        }
+        chunks
+    }
+
+    const WAIT_AUDIO: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn listen_starts_capture_and_streams_init_then_media() {
+        let (broadcaster, _source) = audio_test_broadcaster(2);
+        let server = AudioServer::new(broadcaster);
+        let chunks = listen_first_chunks(&server, 3).await;
+        assert!(chunks[0].init_segment, "first chunk is the init segment");
+        assert!(!chunks[1].init_segment);
+        assert!(!chunks[2].init_segment);
+        assert!(!chunks[1].payload.is_empty());
+        assert!(chunks[1].timestamp_ms <= chunks[2].timestamp_ms);
+    }
+
+    #[tokio::test]
+    async fn listen_late_join_gets_cached_init_exactly_once() {
+        let (broadcaster, _source) = audio_test_broadcaster(2);
+        // Start the generation and wait until it produced the init. Keep
+        // this subscriber alive so the `listen` below joins the same
+        // generation (a second subscription then snapshots the cached init).
+        let sub = broadcaster.subscribe().await.expect("subscribe");
+        let mut rx = sub.resubscribe();
+        loop {
+            match timeout(WAIT_AUDIO, rx.recv()).await {
+                Ok(Ok(AudioEvent::Init(_, _))) => break,
+                Ok(Ok(AudioEvent::Media(_, _))) => continue,
+                _ => panic!("init event never arrived"),
+            }
+        }
+        let server = AudioServer::new(broadcaster);
+        let chunks = listen_first_chunks(&server, 2).await;
+        drop(sub);
+        assert!(chunks[0].init_segment, "cached init comes first");
+        assert!(!chunks[1].init_segment, "no duplicated init on the channel");
+    }
+
+    #[tokio::test]
+    async fn listen_refused_after_shutdown() {
+        let (broadcaster, _source) = audio_test_broadcaster(1);
+        broadcaster.shutdown().await;
+        let server = AudioServer::new(broadcaster);
+        let err = match server.listen(Request::new(SubscribeAudioRequest {})).await {
+            Ok(_) => panic!("listen after shutdown must fail"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn listen_stream_terminates_when_capture_is_killed() {
+        let (broadcaster, source) = audio_test_broadcaster(2);
+        let server = AudioServer::new(broadcaster);
+        let chunks = listen_first_chunks(&server, 1).await;
+        assert!(chunks[0].init_segment);
+        source.kill();
+        // The stream must end (error or close), not hang.
+        let response = server
+            .listen(Request::new(SubscribeAudioRequest {}))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+        let ended = loop {
+            match timeout(WAIT_AUDIO, stream.next()).await {
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(_))) | Ok(None) => break true,
+                Err(_) => break false,
+            }
+        };
+        assert!(ended, "stream must terminate after the source is killed");
     }
 }

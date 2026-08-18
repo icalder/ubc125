@@ -8,7 +8,7 @@ import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2
  * Describes the file ubc125/v1/services.proto.
  */
 export const file_ubc125_v1_services = /*@__PURE__*/
-  fileDesc("Chh1YmMxMjUvdjEvc2VydmljZXMucHJvdG8SCXViYzEyNS52MSIVChNHZXRNb2RlbEluZm9SZXF1ZXN0IiYKFEdldE1vZGVsSW5mb1Jlc3BvbnNlEg4KBnJlc3VsdBgBIAEoCSIbChlHZXRGaXJtd2FyZVZlcnNpb25SZXF1ZXN0IiwKGkdldEZpcm13YXJlVmVyc2lvblJlc3BvbnNlEg4KBnJlc3VsdBgBIAEoCSIZChdHZXRBdWRpb1NldHRpbmdzUmVxdWVzdCI7ChhHZXRBdWRpb1NldHRpbmdzUmVzcG9uc2USDgoGdm9sdW1lGAEgASgJEg8KB3NxdWVsY2gYAiABKAkiEgoQU3RhcnRTY2FuUmVxdWVzdCITChFTdGFydFNjYW5SZXNwb25zZSIRCg9Ib2xkU2NhblJlcXVlc3QiEgoQSG9sZFNjYW5SZXNwb25zZSIYChZHZXRFbmFibGVkQmFua3NSZXF1ZXN0IigKF0dldEVuYWJsZWRCYW5rc1Jlc3BvbnNlEg0KBWJhbmtzGAEgAygIIicKFlNldEVuYWJsZWRCYW5rc1JlcXVlc3QSDQoFYmFua3MYASADKAgiGQoXU2V0RW5hYmxlZEJhbmtzUmVzcG9uc2UiEgoQR2V0U3RhdHVzUmVxdWVzdCKNAQoRR2V0U3RhdHVzUmVzcG9uc2USEQoJZnJlcXVlbmN5GAEgASgJEgwKBGJhbmsYAiABKAkSFAoMY2hhbm5lbF9uYW1lGAMgASgJEhcKD3NpZ25hbF9kZXRlY3RlZBgEIAEoCBIUCgxyYXdfcmVzcG9uc2UYBSABKAkSEgoKbW9kdWxhdGlvbhgGIAEoCSJNCgdDaGFubmVsEg0KBWluZGV4GAEgASgNEgwKBG5hbWUYAiABKAkSEQoJZnJlcXVlbmN5GAMgASgJEhIKCm1vZHVsYXRpb24YBCABKAkiIgoRR2V0Q2hhbm5lbFJlcXVlc3QSDQoFaW5kZXgYASABKA0iOQoSR2V0Q2hhbm5lbFJlc3BvbnNlEiMKB2NoYW5uZWwYASABKAsyEi51YmMxMjUudjEuQ2hhbm5lbCI4ChFTZXRDaGFubmVsUmVxdWVzdBIjCgdjaGFubmVsGAEgASgLMhIudWJjMTI1LnYxLkNoYW5uZWwiFAoSU2V0Q2hhbm5lbFJlc3BvbnNlIiUKFERlbGV0ZUNoYW5uZWxSZXF1ZXN0Eg0KBWluZGV4GAEgASgNIhcKFURlbGV0ZUNoYW5uZWxSZXNwb25zZSIjChNMaXN0Q2hhbm5lbHNSZXF1ZXN0EgwKBGJhbmsYASABKA0iPAoUTGlzdENoYW5uZWxzUmVzcG9uc2USJAoIY2hhbm5lbHMYASADKAsyEi51YmMxMjUudjEuQ2hhbm5lbDLHAQoRU3lzdGVtSW5mb1NlcnZpY2USTwoMR2V0TW9kZWxJbmZvEh4udWJjMTI1LnYxLkdldE1vZGVsSW5mb1JlcXVlc3QaHy51YmMxMjUudjEuR2V0TW9kZWxJbmZvUmVzcG9uc2USYQoSR2V0RmlybXdhcmVWZXJzaW9uEiQudWJjMTI1LnYxLkdldEZpcm13YXJlVmVyc2lvblJlcXVlc3QaJS51YmMxMjUudjEuR2V0RmlybXdhcmVWZXJzaW9uUmVzcG9uc2UyugYKFVNjYW5uZXJDb250cm9sU2VydmljZRJbChBHZXRBdWRpb1NldHRpbmdzEiIudWJjMTI1LnYxLkdldEF1ZGlvU2V0dGluZ3NSZXF1ZXN0GiMudWJjMTI1LnYxLkdldEF1ZGlvU2V0dGluZ3NSZXNwb25zZRJGCglTdGFydFNjYW4SGy51YmMxMjUudjEuU3RhcnRTY2FuUmVxdWVzdBocLnViYzEyNS52MS5TdGFydFNjYW5SZXNwb25zZRJDCghIb2xkU2NhbhIaLnViYzEyNS52MS5Ib2xkU2NhblJlcXVlc3QaGy51YmMxMjUudjEuSG9sZFNjYW5SZXNwb25zZRJYCg9HZXRFbmFibGVkQmFua3MSIS51YmMxMjUudjEuR2V0RW5hYmxlZEJhbmtzUmVxdWVzdBoiLnViYzEyNS52MS5HZXRFbmFibGVkQmFua3NSZXNwb25zZRJYCg9TZXRFbmFibGVkQmFua3MSIS51YmMxMjUudjEuU2V0RW5hYmxlZEJhbmtzUmVxdWVzdBoiLnViYzEyNS52MS5TZXRFbmFibGVkQmFua3NSZXNwb25zZRJICglHZXRTdGF0dXMSGy51YmMxMjUudjEuR2V0U3RhdHVzUmVxdWVzdBocLnViYzEyNS52MS5HZXRTdGF0dXNSZXNwb25zZTABEkkKCkdldENoYW5uZWwSHC51YmMxMjUudjEuR2V0Q2hhbm5lbFJlcXVlc3QaHS51YmMxMjUudjEuR2V0Q2hhbm5lbFJlc3BvbnNlEkkKClNldENoYW5uZWwSHC51YmMxMjUudjEuU2V0Q2hhbm5lbFJlcXVlc3QaHS51YmMxMjUudjEuU2V0Q2hhbm5lbFJlc3BvbnNlElIKDURlbGV0ZUNoYW5uZWwSHy51YmMxMjUudjEuRGVsZXRlQ2hhbm5lbFJlcXVlc3QaIC51YmMxMjUudjEuRGVsZXRlQ2hhbm5lbFJlc3BvbnNlEk8KDExpc3RDaGFubmVscxIeLnViYzEyNS52MS5MaXN0Q2hhbm5lbHNSZXF1ZXN0Gh8udWJjMTI1LnYxLkxpc3RDaGFubmVsc1Jlc3BvbnNlYgZwcm90bzM");
+  fileDesc("Chh1YmMxMjUvdjEvc2VydmljZXMucHJvdG8SCXViYzEyNS52MSIVChNHZXRNb2RlbEluZm9SZXF1ZXN0IiYKFEdldE1vZGVsSW5mb1Jlc3BvbnNlEg4KBnJlc3VsdBgBIAEoCSIbChlHZXRGaXJtd2FyZVZlcnNpb25SZXF1ZXN0IiwKGkdldEZpcm13YXJlVmVyc2lvblJlc3BvbnNlEg4KBnJlc3VsdBgBIAEoCSIZChdHZXRBdWRpb1NldHRpbmdzUmVxdWVzdCI7ChhHZXRBdWRpb1NldHRpbmdzUmVzcG9uc2USDgoGdm9sdW1lGAEgASgJEg8KB3NxdWVsY2gYAiABKAkiFwoVU3Vic2NyaWJlQXVkaW9SZXF1ZXN0IkkKCkF1ZGlvQ2h1bmsSDwoHcGF5bG9hZBgBIAEoDBIUCgx0aW1lc3RhbXBfbXMYAiABKAMSFAoMaW5pdF9zZWdtZW50GAMgASgIIhIKEFN0YXJ0U2NhblJlcXVlc3QiEwoRU3RhcnRTY2FuUmVzcG9uc2UiEQoPSG9sZFNjYW5SZXF1ZXN0IhIKEEhvbGRTY2FuUmVzcG9uc2UiGAoWR2V0RW5hYmxlZEJhbmtzUmVxdWVzdCIoChdHZXRFbmFibGVkQmFua3NSZXNwb25zZRINCgViYW5rcxgBIAMoCCInChZTZXRFbmFibGVkQmFua3NSZXF1ZXN0Eg0KBWJhbmtzGAEgAygIIhkKF1NldEVuYWJsZWRCYW5rc1Jlc3BvbnNlIhIKEEdldFN0YXR1c1JlcXVlc3QijQEKEUdldFN0YXR1c1Jlc3BvbnNlEhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRiYW5rGAIgASgJEhQKDGNoYW5uZWxfbmFtZRgDIAEoCRIXCg9zaWduYWxfZGV0ZWN0ZWQYBCABKAgSFAoMcmF3X3Jlc3BvbnNlGAUgASgJEhIKCm1vZHVsYXRpb24YBiABKAkiTQoHQ2hhbm5lbBINCgVpbmRleBgBIAEoDRIMCgRuYW1lGAIgASgJEhEKCWZyZXF1ZW5jeRgDIAEoCRISCgptb2R1bGF0aW9uGAQgASgJIiIKEUdldENoYW5uZWxSZXF1ZXN0Eg0KBWluZGV4GAEgASgNIjkKEkdldENoYW5uZWxSZXNwb25zZRIjCgdjaGFubmVsGAEgASgLMhIudWJjMTI1LnYxLkNoYW5uZWwiOAoRU2V0Q2hhbm5lbFJlcXVlc3QSIwoHY2hhbm5lbBgBIAEoCzISLnViYzEyNS52MS5DaGFubmVsIhQKElNldENoYW5uZWxSZXNwb25zZSIlChREZWxldGVDaGFubmVsUmVxdWVzdBINCgVpbmRleBgBIAEoDSIXChVEZWxldGVDaGFubmVsUmVzcG9uc2UiIwoTTGlzdENoYW5uZWxzUmVxdWVzdBIMCgRiYW5rGAEgASgNIjwKFExpc3RDaGFubmVsc1Jlc3BvbnNlEiQKCGNoYW5uZWxzGAEgAygLMhIudWJjMTI1LnYxLkNoYW5uZWwyxwEKEVN5c3RlbUluZm9TZXJ2aWNlEk8KDEdldE1vZGVsSW5mbxIeLnViYzEyNS52MS5HZXRNb2RlbEluZm9SZXF1ZXN0Gh8udWJjMTI1LnYxLkdldE1vZGVsSW5mb1Jlc3BvbnNlEmEKEkdldEZpcm13YXJlVmVyc2lvbhIkLnViYzEyNS52MS5HZXRGaXJtd2FyZVZlcnNpb25SZXF1ZXN0GiUudWJjMTI1LnYxLkdldEZpcm13YXJlVmVyc2lvblJlc3BvbnNlMlMKDEF1ZGlvU2VydmljZRJDCgZMaXN0ZW4SIC51YmMxMjUudjEuU3Vic2NyaWJlQXVkaW9SZXF1ZXN0GhUudWJjMTI1LnYxLkF1ZGlvQ2h1bmswATK6BgoVU2Nhbm5lckNvbnRyb2xTZXJ2aWNlElsKEEdldEF1ZGlvU2V0dGluZ3MSIi51YmMxMjUudjEuR2V0QXVkaW9TZXR0aW5nc1JlcXVlc3QaIy51YmMxMjUudjEuR2V0QXVkaW9TZXR0aW5nc1Jlc3BvbnNlEkYKCVN0YXJ0U2NhbhIbLnViYzEyNS52MS5TdGFydFNjYW5SZXF1ZXN0GhwudWJjMTI1LnYxLlN0YXJ0U2NhblJlc3BvbnNlEkMKCEhvbGRTY2FuEhoudWJjMTI1LnYxLkhvbGRTY2FuUmVxdWVzdBobLnViYzEyNS52MS5Ib2xkU2NhblJlc3BvbnNlElgKD0dldEVuYWJsZWRCYW5rcxIhLnViYzEyNS52MS5HZXRFbmFibGVkQmFua3NSZXF1ZXN0GiIudWJjMTI1LnYxLkdldEVuYWJsZWRCYW5rc1Jlc3BvbnNlElgKD1NldEVuYWJsZWRCYW5rcxIhLnViYzEyNS52MS5TZXRFbmFibGVkQmFua3NSZXF1ZXN0GiIudWJjMTI1LnYxLlNldEVuYWJsZWRCYW5rc1Jlc3BvbnNlEkgKCUdldFN0YXR1cxIbLnViYzEyNS52MS5HZXRTdGF0dXNSZXF1ZXN0GhwudWJjMTI1LnYxLkdldFN0YXR1c1Jlc3BvbnNlMAESSQoKR2V0Q2hhbm5lbBIcLnViYzEyNS52MS5HZXRDaGFubmVsUmVxdWVzdBodLnViYzEyNS52MS5HZXRDaGFubmVsUmVzcG9uc2USSQoKU2V0Q2hhbm5lbBIcLnViYzEyNS52MS5TZXRDaGFubmVsUmVxdWVzdBodLnViYzEyNS52MS5TZXRDaGFubmVsUmVzcG9uc2USUgoNRGVsZXRlQ2hhbm5lbBIfLnViYzEyNS52MS5EZWxldGVDaGFubmVsUmVxdWVzdBogLnViYzEyNS52MS5EZWxldGVDaGFubmVsUmVzcG9uc2USTwoMTGlzdENoYW5uZWxzEh4udWJjMTI1LnYxLkxpc3RDaGFubmVsc1JlcXVlc3QaHy51YmMxMjUudjEuTGlzdENoYW5uZWxzUmVzcG9uc2ViBnByb3RvMw");
 
 /**
  * Describes the message ubc125.v1.GetModelInfoRequest.
@@ -53,137 +53,151 @@ export const GetAudioSettingsResponseSchema = /*@__PURE__*/
   messageDesc(file_ubc125_v1_services, 5);
 
 /**
+ * Describes the message ubc125.v1.SubscribeAudioRequest.
+ * Use `create(SubscribeAudioRequestSchema)` to create a new message.
+ */
+export const SubscribeAudioRequestSchema = /*@__PURE__*/
+  messageDesc(file_ubc125_v1_services, 6);
+
+/**
+ * Describes the message ubc125.v1.AudioChunk.
+ * Use `create(AudioChunkSchema)` to create a new message.
+ */
+export const AudioChunkSchema = /*@__PURE__*/
+  messageDesc(file_ubc125_v1_services, 7);
+
+/**
  * Describes the message ubc125.v1.StartScanRequest.
  * Use `create(StartScanRequestSchema)` to create a new message.
  */
 export const StartScanRequestSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 6);
+  messageDesc(file_ubc125_v1_services, 8);
 
 /**
  * Describes the message ubc125.v1.StartScanResponse.
  * Use `create(StartScanResponseSchema)` to create a new message.
  */
 export const StartScanResponseSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 7);
+  messageDesc(file_ubc125_v1_services, 9);
 
 /**
  * Describes the message ubc125.v1.HoldScanRequest.
  * Use `create(HoldScanRequestSchema)` to create a new message.
  */
 export const HoldScanRequestSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 8);
+  messageDesc(file_ubc125_v1_services, 10);
 
 /**
  * Describes the message ubc125.v1.HoldScanResponse.
  * Use `create(HoldScanResponseSchema)` to create a new message.
  */
 export const HoldScanResponseSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 9);
+  messageDesc(file_ubc125_v1_services, 11);
 
 /**
  * Describes the message ubc125.v1.GetEnabledBanksRequest.
  * Use `create(GetEnabledBanksRequestSchema)` to create a new message.
  */
 export const GetEnabledBanksRequestSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 10);
+  messageDesc(file_ubc125_v1_services, 12);
 
 /**
  * Describes the message ubc125.v1.GetEnabledBanksResponse.
  * Use `create(GetEnabledBanksResponseSchema)` to create a new message.
  */
 export const GetEnabledBanksResponseSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 11);
+  messageDesc(file_ubc125_v1_services, 13);
 
 /**
  * Describes the message ubc125.v1.SetEnabledBanksRequest.
  * Use `create(SetEnabledBanksRequestSchema)` to create a new message.
  */
 export const SetEnabledBanksRequestSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 12);
+  messageDesc(file_ubc125_v1_services, 14);
 
 /**
  * Describes the message ubc125.v1.SetEnabledBanksResponse.
  * Use `create(SetEnabledBanksResponseSchema)` to create a new message.
  */
 export const SetEnabledBanksResponseSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 13);
+  messageDesc(file_ubc125_v1_services, 15);
 
 /**
  * Describes the message ubc125.v1.GetStatusRequest.
  * Use `create(GetStatusRequestSchema)` to create a new message.
  */
 export const GetStatusRequestSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 14);
+  messageDesc(file_ubc125_v1_services, 16);
 
 /**
  * Describes the message ubc125.v1.GetStatusResponse.
  * Use `create(GetStatusResponseSchema)` to create a new message.
  */
 export const GetStatusResponseSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 15);
+  messageDesc(file_ubc125_v1_services, 17);
 
 /**
  * Describes the message ubc125.v1.Channel.
  * Use `create(ChannelSchema)` to create a new message.
  */
 export const ChannelSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 16);
+  messageDesc(file_ubc125_v1_services, 18);
 
 /**
  * Describes the message ubc125.v1.GetChannelRequest.
  * Use `create(GetChannelRequestSchema)` to create a new message.
  */
 export const GetChannelRequestSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 17);
+  messageDesc(file_ubc125_v1_services, 19);
 
 /**
  * Describes the message ubc125.v1.GetChannelResponse.
  * Use `create(GetChannelResponseSchema)` to create a new message.
  */
 export const GetChannelResponseSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 18);
+  messageDesc(file_ubc125_v1_services, 20);
 
 /**
  * Describes the message ubc125.v1.SetChannelRequest.
  * Use `create(SetChannelRequestSchema)` to create a new message.
  */
 export const SetChannelRequestSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 19);
+  messageDesc(file_ubc125_v1_services, 21);
 
 /**
  * Describes the message ubc125.v1.SetChannelResponse.
  * Use `create(SetChannelResponseSchema)` to create a new message.
  */
 export const SetChannelResponseSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 20);
+  messageDesc(file_ubc125_v1_services, 22);
 
 /**
  * Describes the message ubc125.v1.DeleteChannelRequest.
  * Use `create(DeleteChannelRequestSchema)` to create a new message.
  */
 export const DeleteChannelRequestSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 21);
+  messageDesc(file_ubc125_v1_services, 23);
 
 /**
  * Describes the message ubc125.v1.DeleteChannelResponse.
  * Use `create(DeleteChannelResponseSchema)` to create a new message.
  */
 export const DeleteChannelResponseSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 22);
+  messageDesc(file_ubc125_v1_services, 24);
 
 /**
  * Describes the message ubc125.v1.ListChannelsRequest.
  * Use `create(ListChannelsRequestSchema)` to create a new message.
  */
 export const ListChannelsRequestSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 23);
+  messageDesc(file_ubc125_v1_services, 25);
 
 /**
  * Describes the message ubc125.v1.ListChannelsResponse.
  * Use `create(ListChannelsResponseSchema)` to create a new message.
  */
 export const ListChannelsResponseSchema = /*@__PURE__*/
-  messageDesc(file_ubc125_v1_services, 24);
+  messageDesc(file_ubc125_v1_services, 26);
 
 /**
  * @generated from service ubc125.v1.SystemInfoService
@@ -192,8 +206,14 @@ export const SystemInfoService = /*@__PURE__*/
   serviceDesc(file_ubc125_v1_services, 0);
 
 /**
+ * @generated from service ubc125.v1.AudioService
+ */
+export const AudioService = /*@__PURE__*/
+  serviceDesc(file_ubc125_v1_services, 1);
+
+/**
  * @generated from service ubc125.v1.ScannerControlService
  */
 export const ScannerControlService = /*@__PURE__*/
-  serviceDesc(file_ubc125_v1_services, 1);
+  serviceDesc(file_ubc125_v1_services, 2);
 

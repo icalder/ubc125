@@ -10,8 +10,8 @@ use super::console::{App, EditField, EditState, InputMode, LevelKind};
 use crate::constants::{
     BANK_STATUS_HEIGHT, CHANNELS_PER_BANK, EDIT_FIELD_HEIGHT, LIVE_SCAN_HEIGHT, MAX_LEVEL,
     PERCENT_BASE, POPUP_HEIGHT_CONFIRM, POPUP_HEIGHT_EDIT, POPUP_HEIGHT_LEVEL, POPUP_WIDTH_CONFIRM,
-    POPUP_WIDTH_EDIT, POPUP_WIDTH_LEVEL, SCANNER_INFO_HEIGHT, STATUS_BAR_HEIGHT, TABLE_COL_FREQ,
-    TABLE_COL_INDEX, TABLE_COL_MOD, TABLE_COL_NAME, TAB_BAR_HEIGHT,
+    POPUP_WIDTH_EDIT, POPUP_WIDTH_LEVEL, SCANNER_INFO_HEIGHT, STATUS_BAR_HEIGHT, TAB_BAR_HEIGHT,
+    TABLE_COL_FREQ, TABLE_COL_INDEX, TABLE_COL_MOD, TABLE_COL_NAME,
 };
 
 /// Render the full application frame.
@@ -21,8 +21,8 @@ pub fn render(f: &mut Frame, app: &App) {
         .margin(1)
         .constraints(
             [
-                Constraint::Length(TAB_BAR_HEIGHT), // Tabs
-                Constraint::Min(0),                   // Content
+                Constraint::Length(TAB_BAR_HEIGHT),    // Tabs
+                Constraint::Min(0),                    // Content
                 Constraint::Length(STATUS_BAR_HEIGHT), // Help/Status
             ]
             .as_ref(),
@@ -81,7 +81,9 @@ fn render_monitor_view(f: &mut Frame, app: &App, area: Rect) {
     // Live scan block
     let scan_text = format!(
         "Bank:      {}\nFrequency: {} MHz\nChannel:   {}",
-        app.scan_status.bank_display(), app.scan_status.frequency, app.scan_status.channel_name
+        app.scan_status.bank_display(),
+        app.scan_status.frequency,
+        app.scan_status.channel_name
     );
 
     let scan_style = if app.scan_status.signal_detected {

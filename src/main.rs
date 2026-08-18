@@ -1,3 +1,4 @@
+mod audio;
 mod cmd;
 mod constants;
 mod modes;

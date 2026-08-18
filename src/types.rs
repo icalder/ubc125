@@ -357,7 +357,9 @@ impl ScanStatus {
 
     /// Display helper for the bank number.
     pub fn bank_display(&self) -> String {
-        self.bank.map(|b| b.to_string()).unwrap_or_else(|| "-".to_string())
+        self.bank
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| "-".to_string())
     }
 }
 
@@ -740,8 +742,7 @@ mod tests {
 
     #[test]
     fn scan_status_bank_display() {
-        let status =
-            ScanStatus::parse_glg("GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,").unwrap();
+        let status = ScanStatus::parse_glg("GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,").unwrap();
         assert_eq!(status.bank_display(), "2");
 
         // Default status has no bank.

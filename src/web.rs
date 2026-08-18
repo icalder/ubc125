@@ -6,11 +6,11 @@
 //! gRPC-Web paths are matched first by service name, everything else (the
 //! browser UI) lands here.
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
@@ -33,7 +33,9 @@ async fn serve_asset(path: &str) -> Response {
     }
     match Assets::get(path) {
         Some(file) => {
-            let mime = mime_guess::from_path(path).first_or_octet_stream().to_string();
+            let mime = mime_guess::from_path(path)
+                .first_or_octet_stream()
+                .to_string();
             Response::builder()
                 .header(header::CONTENT_TYPE, mime)
                 .body(Body::from(file.data.to_vec()))
@@ -54,29 +56,26 @@ async fn file(axum::extract::Path(path): axum::extract::Path<String>) -> impl In
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
     #[tokio::test]
     async fn serves_index_at_root() {
         let response = router()
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .starts_with("text/html"));
+        assert!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         assert!(!body.is_empty());
     }

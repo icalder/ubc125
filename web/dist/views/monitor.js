@@ -42,12 +42,29 @@ function renderLiveScan(status) {
   );
 }
 
-function renderActions(onScan, onHold) {
+function renderActions({ onScan, onHold, audio, onAudioPlay, onAudioStop }) {
   const scan = el("button", { class: "btn", text: "s: Scan" });
   scan.addEventListener("click", onScan);
   const hold = el("button", { class: "btn", text: "h: Hold" });
   hold.addEventListener("click", onHold);
-  return box("Actions", {}, el("div", { class: "actions" }, scan, hold));
+  const play = el("button", { class: "btn", text: "p: Play" });
+  play.disabled = !audio.supported || audio.state !== "off";
+  play.addEventListener("click", onAudioPlay);
+  const stop = el("button", { class: "btn", text: "x: Stop" });
+  stop.disabled = audio.state === "off" || audio.state === "unavailable";
+  stop.addEventListener("click", onAudioStop);
+  // The state span is what the E2E scripts read; its class carries the
+  // state for colouring.
+  const label = !audio.supported ? "not supported" : audio.state;
+  return box(
+    "Actions",
+    {},
+    el("div", { class: "actions" }, scan, hold, play, stop),
+    el("div", {},
+      el("span", { class: "label", text: "Audio: " }),
+      el("span", { class: `value audio-state audio-${label}`, text: label }),
+    ),
+  );
 }
 
 /** Chip label for a 1-based bank number; bank 10 shows `[0]` (console `bank_num % 10` quirk). */
@@ -73,11 +90,11 @@ function renderBanks(banks, onToggle) {
 }
 
 /** Render the monitor view into `container`. */
-export function renderMonitor(container, { info, status, banks, onScan, onHold, onToggleBank }) {
+export function renderMonitor(container, { info, status, banks, audio, onScan, onHold, onToggleBank, onAudioPlay, onAudioStop }) {
   replace(container,
     renderInfo(info),
     renderLiveScan(status),
-    renderActions(onScan, onHold),
+    renderActions({ onScan, onHold, audio, onAudioPlay, onAudioStop }),
     renderBanks(banks, onToggleBank),
   );
 }

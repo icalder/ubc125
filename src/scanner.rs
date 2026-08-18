@@ -1,7 +1,9 @@
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
 
-use crate::constants::{CHANNELS_PER_BANK, MAX_CHANNELS, MAX_LEVEL, NUM_BANKS, PORT_TIMEOUT_MS, READ_TIMEOUT_MS};
+use crate::constants::{
+    CHANNELS_PER_BANK, MAX_CHANNELS, MAX_LEVEL, NUM_BANKS, PORT_TIMEOUT_MS, READ_TIMEOUT_MS,
+};
 use crate::modes::Mode;
 use crate::types::{BankMask, Channel, ChannelIndex, ScanStatus};
 
@@ -43,16 +45,10 @@ pub enum ScannerError {
     Io(#[from] io::Error),
 
     #[error("timed out waiting for response to {command} (partial: {partial:?})")]
-    Timeout {
-        command: String,
-        partial: String,
-    },
+    Timeout { command: String, partial: String },
 
     #[error("unexpected response to {command}: {got}")]
-    UnexpectedResponse {
-        command: String,
-        got: String,
-    },
+    UnexpectedResponse { command: String, got: String },
 
     #[error("volume level must be 0..={MAX_LEVEL}")]
     InvalidVolume(u8),
@@ -598,8 +594,7 @@ mod tests {
     #[test]
     fn set_banks_program_mode_sequence() {
         let mask = BankMask::from_scanner_response("SCG,0101010101");
-        let (mut client, written) =
-            mock_client(&["PRG", "SCG,0101010101", "EPG", "KEY"]);
+        let (mut client, written) = mock_client(&["PRG", "SCG,0101010101", "EPG", "KEY"]);
         client.set_banks(&mask).unwrap();
         assert_eq!(
             *written.lock().unwrap(),
@@ -717,7 +712,8 @@ mod tests {
         let responses: Vec<String> = std::iter::once("PRG".to_string())
             .chain((1..=50).map(cin_response))
             .collect();
-        let (mut client, written) = mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let (mut client, written) =
+            mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let channels = client.get_bank_channels(1).unwrap();
         assert_eq!(channels.len(), 50);
         assert_eq!(channels[0].index.get(), 1);
@@ -737,7 +733,8 @@ mod tests {
         let responses: Vec<String> = std::iter::once("PRG".to_string())
             .chain((51..=100).map(cin_response))
             .collect();
-        let (mut client, written) = mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let (mut client, written) =
+            mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let channels = client.get_bank_channels(2).unwrap();
         assert_eq!(channels.len(), 50);
         assert_eq!(channels[0].index.get(), 51);
@@ -758,7 +755,8 @@ mod tests {
                 _ => "GARBAGE".to_string(),
             })
             .collect();
-        let (mut client, _) = mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let (mut client, _) =
+            mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let channels = client.get_bank_channels(1).unwrap();
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].index.get(), 3);
@@ -781,7 +779,8 @@ mod tests {
         let responses: Vec<String> = std::iter::once("PRG".to_string())
             .chain((1..=50).map(cin_response))
             .collect();
-        let (mut client, written) = mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let (mut client, written) =
+            mock_client(&responses.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         client.ensure_program().unwrap();
         client.get_bank_channels(1).unwrap();
         let written = written.lock().unwrap();
