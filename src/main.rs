@@ -4,6 +4,7 @@ mod constants;
 mod modes;
 mod scanner;
 mod server;
+mod status;
 mod types;
 mod web;
 

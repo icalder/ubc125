@@ -56,6 +56,7 @@ Two layers (details in [web/README.md](./web/README.md) and [tests/web_e2e.md](.
    bash tests/ubc125_stack.sh                 # fake scanner + serve (W5)
    node tests/web/web_pointer_test.mjs        # 1280x720 pointer path (26 checks)
    node tests/web/web_hiccup_phone_test.mjs   # offline banner + 390x844 phone (10 checks)
+   node tests/web/web_two_tabs_test.mjs       # KI-2: two tabs both stay ONLINE (8 checks, ~25 s)
    nix-shell -p socat ffmpeg --run 'node tests/web/web_audio_test.mjs'  # audio Play/Stop + throttle (18 checks, ~2 min; manages the stack itself)
    ```
 

@@ -49,6 +49,13 @@ install):
      views), action buttons ≥ 44 px, 50-row table renders, tap row →
      **Edit** → **Save** round-trip works by touch
 
+- `web_two_tabs_test.mjs` (W5, **KI-2 regression**, ~25 s): two tabs
+  against one serve; both must reach live GLG status, the OFFLINE banner
+  must never appear on either during a 20 s observation, and both must
+  still be live at the end. Pre-fix this failed with the banner flapping
+  alternately on both tabs (49/80 and 24/80 samples) because each new
+  `GetStatus` stream cancelled the previous singleton poller.
+
 - `web_hw_test.mjs` (W6, real scanner): W5 items 1–9 minus the offline
   part, plus the delete-restore round-trip on channel 63 (factory
   "BHX RADAR" 123.9750 AM): delete → row cleared → re-enter exact values
@@ -91,3 +98,7 @@ install):
   continuous/throttled; Edge 151, CDP :9222). Same session: W5 pointer path
   **26/26 pass**, offline banner + 390×844 checks **10/10 pass** (after
   switching all W5/W6 scripts to fresh tabs).
+- 2026-08-19 (KI-2 fix, shared status poller): two-tab check **8/8 pass**
+  (both tabs live, 0 OFFLINE-banner samples in 20 s). Negative control on
+  the pre-fix build (`e1ace48`): banner flapping on both tabs — the check
+  has teeth. Rust `cargo test`: 119 passed / 1 ignored.

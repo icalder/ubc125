@@ -1,17 +1,15 @@
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
 use tonic::{Request, Response, Status};
 
 use crate::audio::{AudioBroadcaster, AudioError, AudioEvent, AudioSubscription};
-use crate::constants::{NUM_BANKS, POLL_INTERVAL_MS};
+use crate::constants::NUM_BANKS;
 use crate::scanner::{ScannerClient, ScannerError};
+use crate::status::{StatusBroadcaster, StatusSubscription};
 use crate::types::{BankMask, Channel, Frequency, Modulation, ScanStatus};
-use tokio::sync::mpsc;
 use tokio_stream::Stream;
-use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use ubc125_grpc::ubc125::v1::audio_service_server::AudioService;
 use ubc125_grpc::ubc125::v1::scanner_control_service_server::ScannerControlService;
 use ubc125_grpc::ubc125::v1::system_info_service_server::SystemInfoService;
@@ -76,26 +74,18 @@ fn channel_from_proto(c: ubc125_grpc::ubc125::v1::Channel) -> Result<Channel, St
 #[derive(Clone)]
 pub struct ScannerServer {
     pub client: Arc<Mutex<ScannerClient>>,
-    /// Stop flag of the currently running `GetStatus` poller, if any.
-    /// A new `GetStatus` stream cancels the previous poller.
-    active_poll: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    /// Shared `GetStatus` poller: one poll task for any number of
+    /// subscribers. The old singleton design cancelled the previous poller
+    /// when a new stream opened, so two clients cancelled each other in a
+    /// ping-pong that flapped their offline banners (KI-2).
+    status: StatusBroadcaster,
 }
 
 impl ScannerServer {
     pub fn new(client: ScannerClient) -> Self {
-        Self {
-            client: Arc::new(Mutex::new(client)),
-            active_poll: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// Cancel any running `GetStatus` poller and register `stop` as the
-    /// active one.
-    fn take_over_poll(&self, stop: Arc<AtomicBool>) {
-        let mut slot = self.active_poll.lock().unwrap();
-        if let Some(prev) = slot.replace(stop.clone()) {
-            prev.store(true, Ordering::Relaxed);
-        }
+        let client = Arc::new(Mutex::new(client));
+        let status = StatusBroadcaster::new(client.clone());
+        Self { client, status }
     }
 }
 
@@ -165,7 +155,7 @@ impl SystemInfoService for ScannerServer {
 
 #[tonic::async_trait]
 impl ScannerControlService for ScannerServer {
-    type GetStatusStream = ReceiverStream<Result<GetStatusResponse, Status>>;
+    type GetStatusStream = Pin<Box<dyn Stream<Item = Result<GetStatusResponse, Status>> + Send>>;
 
     async fn get_audio_settings(
         &self,
@@ -226,49 +216,28 @@ impl ScannerControlService for ScannerServer {
         Ok(Response::new(SetEnabledBanksResponse {}))
     }
 
-    /// Stream the scanner's status, polled every `POLL_INTERVAL_MS`.
-    ///
-    /// Only one poller runs at a time: opening a new stream cancels the
-    /// previous one. Transient poll errors are logged and skipped so a
-    /// serial hiccup does not kill the stream.
+    /// Stream the scanner's status, polled every `POLL_INTERVAL_MS` by a
+    /// poller shared by all `GetStatus` subscribers (started by the first,
+    /// stopped by the last). A client joining mid-generation gets the last
+    /// polled status up front, then the live values. Transient poll errors
+    /// are logged and skipped so a serial hiccup does not kill the streams.
     async fn get_status(
         &self,
         _request: Request<GetStatusRequest>,
     ) -> Result<Response<Self::GetStatusStream>, Status> {
-        let stop = Arc::new(AtomicBool::new(false));
-        self.take_over_poll(stop.clone());
-
-        let (tx, rx) = mpsc::channel(16);
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            loop {
-                if stop.load(Ordering::Relaxed) || tx.is_closed() {
-                    break;
-                }
-                let poll = tokio::task::spawn_blocking({
-                    let client = client.clone();
-                    move || {
-                        let mut scanner = client
-                            .lock()
-                            .map_err(|e| format!("scanner mutex poisoned: {e}"))?;
-                        scanner.get_status().map_err(|e| e.to_string())
-                    }
-                })
-                .await;
-                match poll {
-                    Ok(Ok(status)) => {
-                        if tx.send(Ok(GetStatusResponse::from(status))).await.is_err() {
-                            break;
-                        }
-                    }
-                    Ok(Err(e)) => tracing::warn!("GetStatus poll failed: {e}"),
-                    Err(e) => tracing::warn!("GetStatus poll task failed: {e}"),
-                }
-                tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
+        let subscription = self.status.subscribe().await;
+        // A join after the first poll gets the cached copy up front; the
+        // channel only carries values sent after the join, so there is no
+        // duplicate to skip.
+        let pending_last = subscription
+            .cached_status()
+            .map(|s| GetStatusResponse::from(s.clone()));
+        let stream = StatusStream {
+            events: BroadcastStream::new(subscription.resubscribe()),
+            pending_last,
+            _subscription: subscription,
+        };
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn get_channel(
@@ -345,6 +314,46 @@ pub struct AudioServer {
 impl AudioServer {
     pub fn new(broadcaster: Arc<AudioBroadcaster>) -> Self {
         Self { broadcaster }
+    }
+}
+
+/// Server-streaming response for `GetStatus`: the cached status (for
+/// mid-generation joins), then one message per successful poll of the
+/// shared poller, until the poller stops.
+struct StatusStream {
+    events: BroadcastStream<ScanStatus>,
+    /// Last polled status owed to this client before any live values.
+    pending_last: Option<GetStatusResponse>,
+    /// Keeps the subscriber slot alive for the stream's lifetime; dropping
+    /// the stream returns the slot to the broadcaster (the last one stops
+    /// the shared poller).
+    _subscription: StatusSubscription,
+}
+
+impl Stream for StatusStream {
+    type Item = Result<GetStatusResponse, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(status) = self.pending_last.take() {
+            return Poll::Ready(Some(Ok(status)));
+        }
+        loop {
+            match Pin::new(&mut self.events).poll_next(cx) {
+                // We fell behind (this client was slow): status is
+                // latest-state, so skip to the next value rather than
+                // ending the stream — ending it would flap the client's
+                // offline banner (KI-2).
+                Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(_)))) => continue,
+                Poll::Ready(Some(Ok(status))) => {
+                    return Poll::Ready(Some(Ok(GetStatusResponse::from(status))));
+                }
+                // The poller stopped (channel closed): end the stream; the
+                // client reconnects, and a fresh poller starts if no other
+                // subscriber remains.
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
     }
 }
 
@@ -446,6 +455,7 @@ mod tests {
     use crate::audio::ffmpeg::FakeSource;
     use crate::audio::webm::fixtures::build_fixture;
     use crate::scanner::mock::{GLG_OK, mock_client};
+    use std::time::Duration;
     use tokio::time::timeout;
     use tokio_stream::StreamExt;
     use tonic::Code;
@@ -609,32 +619,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_get_status_cancels_previous_poller() {
-        // Two canned responses, then exhaustion.
-        let (client, written) = mock_client(&[GLG_OK, GLG_OK]);
+    async fn get_status_subscribers_share_one_poller() {
+        // Three canned responses, then exhaustion.
+        let (client, written) = mock_client(&[GLG_OK, GLG_OK, GLG_OK]);
         let server = ScannerServer::new(client);
         let response = server
             .get_status(Request::new(GetStatusRequest {}))
             .await
             .unwrap();
         let mut first = response.into_inner();
-        let _value = first.next().await.unwrap().unwrap();
-        // Drop the first stream, open a second: the old poller must stop.
-        drop(first);
-        // Give the old poller a chance to observe the cancellation.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let v1 = timeout(WAIT_AUDIO, first.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(v1.frequency, "123.9750");
+        // A second client joins: it must not cancel the first client's
+        // stream (KI-2: the old singleton poller made two clients cancel
+        // each other in a ping-pong that flapped their offline banners).
         let response = server
             .get_status(Request::new(GetStatusRequest {}))
             .await
             .unwrap();
         let mut second = response.into_inner();
-        let _value = second.next().await.unwrap().unwrap();
+        // The first client keeps receiving after the second joined.
+        let v2 = timeout(WAIT_AUDIO, first.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(v2.frequency, "123.9750");
+        // The second client gets the cached status up front (or a live
+        // poll if it joined before the first one).
+        let v3 = timeout(WAIT_AUDIO, second.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(v3.frequency, "123.9750");
+        drop(first);
         drop(second);
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The shared poller stops once the last subscriber leaves (grace
+        // window plus at most one in-flight poll).
+        let deadline = std::time::Instant::now() + WAIT_AUDIO;
+        while server.status.is_active() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!server.status.is_active(), "poller did not stop");
         let sent: Vec<String> = written.lock().unwrap().clone();
-        // Exactly the two served polls; no further GLG polls after the
-        // pollers stopped.
-        assert_eq!(sent, vec!["GLG\r".to_string(); 2]);
+        // One poller served both clients: the three canned responses plus
+        // at most one in-flight poll after the stop.
+        assert!(
+            sent.iter().all(|c| c == "GLG\r"),
+            "unexpected commands: {sent:?}"
+        );
+        assert!(sent.len() <= 4, "unexpected poll count: {sent:?}");
     }
 
     // -- AudioService::Listen (6.7) --
