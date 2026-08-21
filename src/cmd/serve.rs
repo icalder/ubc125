@@ -24,8 +24,10 @@ pub struct ServeArgs {
     // No short flag: `-d` is reserved for the global debug flag (an
     // automatic `-d` here would shadow it and break "Use -d for debug
     // logging").
-    #[arg(long, default_value_t = String::from("/dev/ttyACM0"))]
-    pub device: String,
+    /// Scanner serial device (default: auto-detect the UBC125 by its USB
+    /// id, 1965:0018).
+    #[arg(long, env = "UBC125_DEVICE")]
+    pub device: Option<String>,
     /// ALSA capture device for the audio pipeline (default is the Pi's USB
     /// mic, card 2).
     #[arg(long, env = "UBC125_AUDIO_DEVICE", default_value = DEFAULT_AUDIO_DEVICE)]
@@ -54,7 +56,8 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
         .register_encoded_file_descriptor_set(ubc125_grpc::ubc125::v1::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
-    let client = ScannerClient::new(&args.device)?;
+    let device = crate::detect::resolve_device(args.device.as_deref())?;
+    let client = ScannerClient::new(&device)?;
     let scanner_server = server::ScannerServer::new(client);
     let audio_broadcaster = Arc::new(AudioBroadcaster::new(audio_source(args)));
     let audio_server = server::AudioServer::new(audio_broadcaster.clone());
@@ -98,7 +101,7 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Bind first so the banner only prints once the port is actually ours.
     let listener = tokio::net::TcpListener::bind(&args.server_addr).await?;
-    eprintln!("Scanner device:  {}", args.device);
+    eprintln!("Scanner device:  {device}");
     eprintln!("Listening on:    {}", args.server_addr);
     eprintln!("Web UI:          http://{}/", args.server_addr);
     eprintln!("gRPC (grpcurl):  grpc://{}", args.server_addr);

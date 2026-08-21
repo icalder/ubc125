@@ -1,6 +1,7 @@
 mod audio;
 mod cmd;
 mod constants;
+mod detect;
 mod modes;
 mod scanner;
 mod server;

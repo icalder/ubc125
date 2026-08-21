@@ -25,8 +25,10 @@ use super::renderer;
 
 #[derive(Args)]
 pub struct ConsoleArgs {
-    #[arg(short, long, default_value_t = String::from("/dev/ttyACM0"))]
-    pub console_device: String,
+    /// Scanner serial device (default: auto-detect the UBC125 by its USB
+    /// id, 1965:0018).
+    #[arg(short, long, env = "UBC125_DEVICE")]
+    pub console_device: Option<String>,
 }
 
 #[derive(Default, PartialEq)]
@@ -206,7 +208,8 @@ impl App {
 }
 
 pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = ScannerClient::new(&args.console_device)?;
+    let device = crate::detect::resolve_device(args.console_device.as_deref())?;
+    let mut client = ScannerClient::new(&device)?;
     let mut app = App::new(&mut client);
 
     enable_raw_mode()?;

@@ -26,6 +26,8 @@ The aim here is to have a [Ratatui](https://ratatui.rs/) console interface mimic
 
 Code for the console mode is in [console.rs](./src/cmd/console.rs).
 
+Scanner port: `--device` (serve) and `--console-device` (console) are optional. When omitted, the port is auto-detected from the scanner's built-in USB id (1965:0018, Uniden UBC125XLT) among `ttyACM*`/`ttyUSB*` devices — ACM before USB, numeric order — by reading sysfs ([detect.rs](./src/detect.rs)); nothing is opened or probed. `UBC125_DEVICE` sets the port for both modes.
+
 ## Serve Mode
 
 Exposes a gRPC (and gRPC-Web) interface to the scanner for remote control.  The gRPC service is defined in [services.proto](./lib/grpc/proto/ubc125/v1/services.proto).
