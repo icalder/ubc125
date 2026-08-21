@@ -63,26 +63,28 @@ install):
   (state restored); all values left as found.
 
 - `web_audio_test.mjs` (W5, audio over gRPC — run under
-  `nix-shell -p socat ffmpeg --run 'node tests/web/web_audio_test.mjs'`;
+  `node tests/web/web_audio_test.mjs` (needs a debug build of the binary;
+  the stack script self-provisions socat);
   ~2 min). The script (re)starts the stack itself for each phase
   (`bash tests/ubc125_stack.sh` with `UBC125_AUDIO_CMD` set):
-  1. Phase A — deterministic file: generates `/tmp/cap.webm` (60 s lavfi
-     sine) if missing; stack runs `python3 tests/paced_file.py
-     /tmp/cap.webm 4` (paced replay — raw `cat` outpaces the 48 KiB
-     broadcast queue and the stream backpressure-errors before playback).
+  1. Phase A — deterministic file: generates `/tmp/cap.webm` (60 s of tone
+     from `ubc125 audio-tone` — the same muxer the Pi capture uses); stack
+     runs `python3 tests/paced_file.py /tmp/cap.webm 4` (paced replay —
+     raw `cat` outpaces the 48 KiB broadcast queue and the stream
+     backpressure-errors before playback).
      audio defaults `off` (Play enabled, Stop disabled) → Play →
      `playing` → file ends → `reconnecting` → generation replays →
      `playing` again (late/reconnect clients get a fresh init) → Stop →
      `off`, capture process tree gone
-  2. Phase B — continuous + throttled: stack runs the D1 sine command;
-     `emulateNetworkConditions` 64 KiB/s download → broadcast lag → stream
-     error → `reconnecting` observed (never `unavailable`) → unthrottle →
-     `playing` → Stop, no leftover `ffmpeg`
+  2. Phase B — continuous + throttled: stack runs `ubc125 audio-tone
+     --loop --out -` (faster than real time); `emulateNetworkConditions`
+     64 KiB/s download → broadcast lag → stream error → `reconnecting`
+     observed (never `unavailable`) → unthrottle → `playing` → Stop, no
+     leftover tone process
   3. Regression: `web_pointer_test.mjs` 26/26 and
      `web_hiccup_phone_test.mjs` 10/10 re-run green in the same session
      (both now open a fresh tab like the audio test — a stale-tab reuse
-     intermittently dropped typed input; see `AUDIO-IMPL.md` 8.4
-     findings).
+     intermittently dropped typed input).
 
 ## Results
 

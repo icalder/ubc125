@@ -452,7 +452,7 @@ impl AudioService for AudioServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::ffmpeg::FakeSource;
+    use crate::audio::source::FakeSource;
     use crate::audio::webm::fixtures::build_fixture;
     use crate::scanner::mock::{GLG_OK, mock_client};
     use std::time::Duration;

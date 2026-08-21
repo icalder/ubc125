@@ -1,3 +1,4 @@
+pub mod audio_tone;
 pub mod cli;
 pub mod console;
 mod renderer;

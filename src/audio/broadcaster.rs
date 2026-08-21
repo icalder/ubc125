@@ -1,7 +1,7 @@
 //! Live audio broadcast: one capture generation at a time, fanned out to any
 //! number of gRPC subscribers.
 //!
-//! Lifecycle (AUDIO-IMPL.md, group 5):
+//! Lifecycle:
 //! - the first `subscribe()` starts the capture source and the pump task;
 //! - further subscribers join the same generation and are handed the cached
 //!   init segment so they can build a fresh `MediaSource`;
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
-use crate::audio::ffmpeg::{CaptureSource, SourceError, SourceEvent, SourceExit, StopHandle};
+use crate::audio::source::{CaptureSource, SourceError, SourceEvent, SourceExit, StopHandle};
 use crate::audio::webm::{DEFAULT_MAX_SEGMENT_SIZE, Segment, WebmSegmenter};
 
 /// Broadcast channel capacity per generation.
@@ -433,7 +433,6 @@ async fn end_generation(inner: &Inner, gen_id: u64, exit: GenerationExit) {
                 GenerationExit::Failed => Status::Failed,
             },
         );
-    } else {
     }
 }
 
@@ -490,10 +489,8 @@ fn elapsed_ms(started_at: Instant) -> i64 {
 
 fn set_status(inner: &Inner, gen_id: Option<u64>, status: Status) {
     let mut state = inner.state();
-    if let Some(gen_id) = gen_id {
-        if !state.generation.as_ref().is_some_and(|a| a.id == gen_id) {
-            return;
-        }
+    if gen_id.is_some_and(|id| !state.generation.as_ref().is_some_and(|a| a.id == id)) {
+        return;
     }
     set_status_locked(&mut state, status);
 }
@@ -508,7 +505,7 @@ fn set_status_locked(state: &mut State, status: Status) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::ffmpeg::FakeSource;
+    use crate::audio::source::FakeSource;
     use crate::audio::webm::fixtures::build_fixture;
     use std::time::Instant;
     use tokio::time::timeout;
@@ -761,10 +758,7 @@ mod tests {
         let sub2 = broadcaster.subscribe().await.expect("resubscribe");
         let mut rx2 = sub2.resubscribe();
         assert_eq!(source.start_count(), 2);
-        assert!(matches!(
-            next_event(&mut rx2).await,
-            AudioEvent::Init(_, _)
-        ));
+        assert!(matches!(next_event(&mut rx2).await, AudioEvent::Init(_, _)));
         drop(sub2);
     }
 

@@ -30,7 +30,10 @@
             pkgs.pkg-config
             pkgs.protobuf
           ];
-          # buildInputs = [ pkgs.udev ]; # Add if needed
+          # System libraries linked into the binary (alsa + opus): buildInputs
+          # so buildRustPackage feeds their pkgconfig dirs to PKG_CONFIG_PATH
+          # and they end up in the runtime closure.
+          buildInputs = [ pkgs.alsa-lib pkgs.libopus ];
         };
     in
     {
@@ -77,6 +80,8 @@
               toolchain
               pkgs.pkg-config
               pkgs.protobuf
+              pkgs.alsa-lib
+              pkgs.libopus
               pkgs.rust-analyzer-unwrapped
             ];
             RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";

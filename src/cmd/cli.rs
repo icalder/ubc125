@@ -15,4 +15,7 @@ pub struct Cli {
 pub enum Commands {
     Serve(super::serve::ServeArgs),
     Console(super::console::ConsoleArgs),
+    /// Deterministic WebM/Opus tone generator (test fixture, hidden).
+    #[command(hide = true)]
+    AudioTone(super::audio_tone::AudioToneArgs),
 }

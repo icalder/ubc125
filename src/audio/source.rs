@@ -1,14 +1,18 @@
-//! Capture sources: supervised child processes emitting a WebM byte stream.
+//! Capture sources: supervised producers of a WebM byte stream.
 //!
-//! The production source is [`FfmpegSource`] (ALSA input → libopus → WebM on
-//! stdout). [`CommandSource`] runs an arbitrary command line whose stdout is
-//! the WebM stream (used for the `--audio-cmd` test hook and by unit tests
-//! with real ffmpeg). Both implement [`CaptureSource`].
+//! Sources implement [`CaptureSource`] and are started by the
+//! `AudioBroadcaster` on the first subscriber:
+//! - [`CommandSource`] runs an arbitrary command line whose stdout is the
+//!   WebM stream (the `--audio-cmd` test hook; E2E tests feed it `ubc125
+//!   audio-tone` output);
+//! - the production source is the in-process ALSA → Opus → WebM pipeline
+//!   (`crate::audio::native`), which reuses the same event channel and stop
+//!   plumbing as the command sources.
 //!
-//! Process supervision rules:
+//! Command-source supervision rules:
 //! - stdout is read asynchronously with `AsyncReadExt` (no `spawn_blocking`);
 //! - stderr is drained into a bounded ring and surfaced on non-clean exit;
-//! - [`CaptureHandle::stop`] kills the child and **awaits its exit** so the
+//! - [`StopHandle::stop`] kills the child and **awaits its exit** so the
 //!   ALSA device is released before the handle is considered stopped.
 
 use std::error::Error;
@@ -34,7 +38,7 @@ use tracing::warn;
 pub const DEFAULT_AUDIO_DEVICE: &str = "hw:2";
 
 /// Capacity of the source event channel.
-const EVENT_CHANNEL_CAPACITY: usize = 64;
+pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 64;
 /// Bytes of stderr retained for diagnostics.
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
 /// Stdout read buffer size.
@@ -64,6 +68,10 @@ impl SourceExit {
     pub fn is_clean(&self) -> bool {
         matches!(self, Self::Clean)
     }
+
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
 }
 
 /// Errors starting a capture source.
@@ -71,17 +79,27 @@ impl SourceExit {
 pub enum SourceError {
     /// The child process could not be spawned (missing binary, bad args).
     Spawn(IoError),
+    /// An in-process source failed to start (e.g. the ALSA device could
+    /// not be opened); the string carries the reason.
+    Start(String),
 }
 
 impl fmt::Display for SourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Spawn(e) => write!(f, "failed to spawn capture process: {e}"),
+            Self::Start(reason) => write!(f, "failed to start capture: {reason}"),
         }
     }
 }
 
 impl Error for SourceError {}
+
+impl From<crate::audio::alsacapture::PcmError> for SourceError {
+    fn from(e: crate::audio::alsacapture::PcmError) -> Self {
+        Self::Start(e.to_string())
+    }
+}
 
 /// A capture source that can start supervised WebM-producing processes.
 ///
@@ -97,7 +115,7 @@ pub trait CaptureSource: Send + Sync {
 /// Shared stop state between a [`CaptureHandle`] and its reader task.
 pub(crate) struct HandleStop {
     pid: std::sync::Mutex<Option<u32>>,
-    cancel: watch::Sender<bool>,
+    pub(crate) cancel: watch::Sender<bool>,
     /// Persistent record that the reader task finished. `watch::Sender::send`
     /// drops values with no receivers, so a source that exits before
     /// `stop()` is called would otherwise leave the stopper hanging.
@@ -106,7 +124,7 @@ pub(crate) struct HandleStop {
 }
 
 impl HandleStop {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let (cancel, _) = watch::channel(false);
         let (exited, _) = watch::channel(false);
         Self {
@@ -118,7 +136,7 @@ impl HandleStop {
     }
 
     /// Mark the reader task finished.
-    fn mark_exited(&self) {
+    pub(crate) fn mark_exited(&self) {
         self.exited_flag.store(true, Ordering::SeqCst);
         let _ = self.exited.send(true);
     }
@@ -127,7 +145,7 @@ impl HandleStop {
 /// A running capture: an event stream plus a stop handle.
 pub struct CaptureHandle {
     pub(crate) rx: mpsc::Receiver<SourceEvent>,
-    stop: Arc<HandleStop>,
+    pub(crate) stop: Arc<HandleStop>,
 }
 
 impl CaptureHandle {
@@ -153,8 +171,8 @@ pub struct StopHandle(Arc<HandleStop>);
 impl StopHandle {
     pub async fn stop(&self) {
         if let Some(pid) = *self.0.pid.lock().unwrap() {
-            // SIGKILL: ffmpeg handles no signals in our usage; the kill must
-            // release the ALSA device immediately.
+            // SIGKILL: command sources handle no signals in our usage; the
+            // kill must release the ALSA device immediately.
             unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
         }
         let _ = self.0.cancel.send(true);
@@ -190,74 +208,6 @@ impl CaptureSource for CommandSource {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<CaptureHandle, SourceError>> + Send + '_>> {
         Box::pin(run_capture(&self.argv, &self.label))
-    }
-}
-
-/// Production capture source: ffmpeg from an ALSA device to WebM/Opus on
-/// stdout.
-#[derive(Debug, Clone)]
-pub struct FfmpegSource {
-    device: String,
-}
-
-impl FfmpegSource {
-    /// `device` is an ALSA device string such as `hw:2`.
-    pub fn new(device: impl Into<String>) -> Self {
-        Self {
-            device: device.into(),
-        }
-    }
-
-    /// The ffmpeg command line: mono ALSA input resampled to 16 kHz, Opus at
-    /// 24 kbps in 20 ms frames, WebM clusters of ~200 ms on stdout.
-    pub fn ffmpeg_argv(&self) -> Vec<String> {
-        [
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-f",
-            "alsa",
-            "-channels",
-            "1",
-            "-i",
-            &self.device,
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-c:a",
-            "libopus",
-            "-b:a",
-            "24k",
-            "-application",
-            "audio",
-            "-frame_duration",
-            "20",
-            "-f",
-            "webm",
-            "-cluster_time_limit",
-            "200",
-            "-flush_packets",
-            "1",
-            "pipe:1",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
-    }
-}
-
-impl CaptureSource for FfmpegSource {
-    fn start(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<CaptureHandle, SourceError>> + Send + '_>> {
-        let device = self.device.clone();
-        Box::pin(async move {
-            let argv = FfmpegSource::new(device).ffmpeg_argv();
-            run_capture(&argv, "ffmpeg").await
-        })
     }
 }
 
@@ -601,66 +551,4 @@ mod tests {
         assert!(segments[1..].iter().all(|s| matches!(s, Segment::Media(_))));
     }
 
-    #[tokio::test]
-    #[ignore = "requires an ffmpeg binary on PATH (nix-shell -p ffmpeg)"]
-    async fn real_ffmpeg_sine_smoke() {
-        // Generated tone: exercises spawn, async stdout pumping, segmenting,
-        // and stop/await-exit without an ALSA device.
-        let argv: Vec<String> = [
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=f=440",
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-c:a",
-            "libopus",
-            "-f",
-            "webm",
-            "-cluster_time_limit",
-            "200",
-            "pipe:1",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        let source = CommandSource::new(argv);
-        let handle = source.start().await.expect("ffmpeg must exist");
-        let stop = handle.stop_handle();
-        let mut events = handle.into_events();
-        let mut segmenter = WebmSegmenter::new(DEFAULT_MAX_SEGMENT_SIZE);
-        let mut got_init = false;
-        let mut clusters = 0u32;
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while clusters < 3 {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for clusters (init={got_init})"
-            );
-            match timeout(Duration::from_secs(10), events.recv())
-                .await
-                .expect("read timed out")
-            {
-                Some(SourceEvent::Bytes(b)) => {
-                    for segment in segmenter.feed(&b).unwrap() {
-                        match segment {
-                            Segment::Init(_) => got_init = true,
-                            Segment::Media(_) => clusters += 1,
-                        }
-                    }
-                }
-                Some(SourceEvent::End(e)) => panic!("ffmpeg exited early: {e:?}"),
-                None => panic!("event channel closed"),
-            }
-        }
-        assert!(got_init, "init segment must precede clusters");
-        timeout(WAIT, stop.stop()).await.expect("stop timed out");
-    }
 }

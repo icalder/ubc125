@@ -32,7 +32,7 @@ Exposes a gRPC (and gRPC-Web) interface to the scanner for remote control.  The 
 
 Code for the serve mode is in [serve.rs](./src/cmd/serve.rs).  The gRPC handler methods are defined in [server.rs](./src/server.rs).  All RPCs are implemented.
 
-Audio: `AudioService/Listen` streams the scanner's audio as WebM/Opus chunks (first chunk is the WebM header/init segment, then cluster-sized media chunks). The capture (ALSA mic via `ffmpeg`, or `UBC125_AUDIO_CMD` for tests) starts lazily on the first `Listen` and is keyed to that client's id; `AudioService/StopCapture` stops it for that id (a browser fetch abort does not close the TCP connection, so without it the capture would keep holding the audio device). See [AUDIO-PLAN.md](./AUDIO-PLAN.md) / [AUDIO-IMPL.md](./AUDIO-IMPL.md); Rust audio code in [src/audio/](./src/audio/mod.rs).
+Audio: `AudioService/Listen` streams the scanner's audio as WebM/Opus chunks (first chunk is the WebM header/init segment, then cluster-sized media chunks). The capture (ALSA mic via the native `alsa`+`opus` pipeline, or `UBC125_AUDIO_CMD` for tests; the hidden `ubc125 audio-tone` subcommand is the ffmpeg-free test fixture) starts lazily on the first `Listen` and is keyed to that client's id; `AudioService/StopCapture` stops it for that id (a browser fetch abort does not close the TCP connection, so without it the capture would keep holding the audio device). Rust audio code in [src/audio/](./src/audio/mod.rs).
 
 The server enables `accept_http1`, a permissive CORS layer, and per-service `GrpcWebLayer`s, so browsers can talk to it directly over grpc-web.  On the same port it also serves the web UI: everything that is not a gRPC path falls through to an axum static router over `web/dist` (embedded at compile time with `rust-embed`; see [web.rs](./src/web.rs)).  `GrpcWebLayer` is applied per service (not as a global fallback) because it 400s all non-grpc-web HTTP/1.1.
 
@@ -57,7 +57,7 @@ Two layers (details in [web/README.md](./web/README.md) and [tests/web_e2e.md](.
    node tests/web/web_pointer_test.mjs        # 1280x720 pointer path (26 checks)
    node tests/web/web_hiccup_phone_test.mjs   # offline banner + 390x844 phone (10 checks)
    node tests/web/web_two_tabs_test.mjs       # KI-2: two tabs both stay ONLINE (8 checks, ~25 s)
-   nix-shell -p socat ffmpeg --run 'node tests/web/web_audio_test.mjs'  # audio Play/Stop + throttle (18 checks, ~2 min; manages the stack itself)
+   node tests/web/web_audio_test.mjs   # audio Play/Stop + throttle (18 checks, ~2 min; needs target/debug/ubc125, manages the stack itself)
    ```
 
    `web_hiccup_phone_test.mjs` kills and restarts the fake stack itself. W6 (`tests/web/web_hw_test.mjs`) runs the same list against `serve --device /dev/ttyACM0` with round-trip-only writes; current pass counts are recorded in [tests/web_e2e.md](./tests/web_e2e.md).
@@ -85,7 +85,7 @@ UBC125_REGEN=1 cargo build -p ubc125-grpc
 - Communication/validation failures surface as `ScannerError`; the gRPC server maps it to status codes (`invalid_argument` / `unavailable` / `internal`).
 - Scanner response parsing (GLG, CIN, SCG) and domain types (`Frequency`, `Channel`, `ChannelIndex`, `BankMask`, `ScanStatus`) live in [types.rs](./src/types.rs).
 - The gRPC server shares one client behind `Arc<Mutex<ScannerClient>>`; blocking serial I/O runs in `spawn_blocking`.
-- Audio: `src/audio/` — `ffmpeg.rs` spawns the capture (ALSA → Opus WebM to stdout; `UBC125_AUDIO_CMD` override), `webm.rs` splits the stream into cluster-sized segments, `broadcaster.rs` fans the segments out to `Listen` subscribers (per-subscriber bounded queue with send timeout; id-gated start/stop so one client's `StopCapture` cannot kill another's).
+- Audio: `src/audio/` — `native.rs` runs the capture natively (ALSA `PcmReader` → `FrameSplitter` → `OpusFrameEncoder` → `WebmMuxer`, no child process; `AlsaOpusSource` for the device, `ToneSource`/`audio-tone` for tests), `source.rs` holds the `CaptureSource` trait + `CommandSource` (`UBC125_AUDIO_CMD` override), `webm.rs` splits the stream into cluster-sized segments, `broadcaster.rs` fans the segments out to `Listen` subscribers (per-subscriber bounded queue with send timeout; id-gated start/stop so one client's `StopCapture` cannot kill another's).
 
 ## Documentation
 

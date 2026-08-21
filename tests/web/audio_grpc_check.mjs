@@ -1,4 +1,4 @@
-// Audio gRPC streaming check (AUDIO-IMPL 8.3).
+// Audio gRPC streaming check.
 //
 // A real binary client for AudioService/Listen (grpcurl's text output cannot
 // verify WebM payloads): connects over grpc-web to a running `ubc125 serve`

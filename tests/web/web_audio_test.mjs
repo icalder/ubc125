@@ -1,4 +1,4 @@
-// Audio browser E2E (AUDIO-IMPL 8.4).
+// Audio browser E2E.
 //
 // Two phases against the fake-scanner stack with D1 audio sources:
 //
@@ -11,17 +11,16 @@
 //      fresh MediaSource) -> playing again. Stop releases the source
 //      process.
 //
-//   B. Continuous + throttled client: UBC125_AUDIO_CMD = ffmpeg lavfi sine
-//      (faster than real time, so a slow client cannot keep up). With a
-//      64 KB/s downlink the server-side broadcast channel lags, the stream
-//      ends as an error, and the client cycles through "reconnecting".
-//      Unthrottled, a generation flows to "playing".
+//   B. Continuous + throttled client: UBC125_AUDIO_CMD = `ubc125
+//      audio-tone --loop` (faster than real time, so a slow client cannot
+//      keep up). With a 64 KB/s downlink the server-side broadcast channel
+//      lags, the stream ends as an error, and the client cycles through
+//      "reconnecting". Unthrottled, a generation flows to "playing".
 //
-// Prereqs: Edge launched by the browser-tools skill (CDP on :9222);
-// ffmpeg on the PATH of the shell running this script (for the file and the
-// sine source) — e.g.
-//   nix-shell -p socat ffmpeg --run 'node tests/web/web_audio_test.mjs'
-// (the stack script self-provisions socat if needed).
+// Prereqs: Edge launched by the browser-tools skill (CDP on :9222) and a
+// debug build of the binary (cargo build --bins); the stack script
+// self-provisions socat if needed.
+//   node tests/web/web_audio_test.mjs
 
 import { execSync } from "child_process";
 import { fileURLToPath } from "url";
@@ -85,16 +84,17 @@ const pgrep = (pattern) =>
 
 // -- phase A: deterministic file source --------------------------------------
 
-// 60 s of tone (same shape as the Pi capture; the file streams into the
-// server in a second or two, long enough for "playing" to be observable,
-// then ends -> exercises the reconnect/replay cycle).
+// 60 s of tone from the same muxer the Pi capture uses (the file streams
+// into the server in a second or two, long enough for "playing" to be
+// observable, then ends -> exercises the reconnect/replay cycle).
 //
-// The file must be the exact `pipe:1` byte stream: written through a pipe,
-// ffmpeg cannot seek back, so the Segment element keeps its unknown size
-// (a finite Segment size — what a seekable file output produces — is
-// rejected by the segmenter and by Chrome's MSE alike).
+// The file must keep the streaming byte shape: the muxer always writes the
+// Segment element with an unknown size (it cannot seek back to patch it
+// in), which is what the segmenter and Chrome's MSE expect (a finite
+// Segment size is rejected by both).
+const bin = `${root}/target/debug/ubc125`;
 execSync(
-  'rm -f /tmp/cap.webm; ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i sine=f=440:duration=60 -ar 16000 -ac 1 -c:a libopus -f webm -cluster_time_limit 200 pipe:1 > /tmp/cap.webm',
+  `rm -f /tmp/cap.webm; ${bin} audio-tone --out /tmp/cap.webm --duration 60`,
   { stdio: "inherit", shell: "/bin/bash" },
 );
 // Pace the file over ~4 s: `cat` would dump it in milliseconds and the
@@ -145,15 +145,15 @@ ok(
 
 // -- phase B: continuous source, throttled client ----------------------------
 
-console.log("starting stack (sine audio source)...");
+console.log("starting stack (tone audio source)...");
 execSync(
-  `UBC125_AUDIO_CMD="ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i sine=f=440 -ar 16000 -ac 1 -c:a libopus -f webm -cluster_time_limit 200 pipe:1" bash ${stack}`,
+  `UBC125_AUDIO_CMD="${bin} audio-tone --loop --out -" bash ${stack}`,
   { timeout: 60000 },
 );
 await p.reload({ waitUntil: "networkidle2" });
 await sleep(1500);
 
-// 64 KB/s downlink: the faster-than-real-time sine source outruns the
+// 64 KB/s downlink: the faster-than-real-time tone source outruns the
 // 64-slot broadcast channel, the server ends the stream as an error, and
 // the client must cycle through reconnecting.
 await p.emulateNetworkConditions({
@@ -181,7 +181,7 @@ await watchAudio("off", 5000);
 await sleep(500);
 // Bracket trick: the pattern must not appear literally in the command line
 // of the shell execSync spawns, or pgrep matches that shell itself.
-ok(pgrep("sine=f=[4]40") === "", "no leftover ffmpeg after Stop");
+ok(pgrep("audio-tone --l[o]op") === "", "no leftover tone source after Stop");
 
 await p.close();
 console.log(`\n${pass} passed, ${fail} failed`);

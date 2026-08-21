@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stream a WebM file to stdout paced over a fixed duration.
 
-For the audio E2E (AUDIO-IMPL 8.4, phase A): `cat` would dump the whole
+For the audio E2E: `cat` would dump the whole
 file in milliseconds, the server's broadcast channel (64 slots) would
 overflow before the browser's first poll, and the stream would die with a
 Lagged error before a single chunk was delivered. Pacing the file over a

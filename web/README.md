@@ -55,8 +55,10 @@ The app talks to `location.origin` by default. For cross-origin dev:
 `http://localhost:50051/?server=http://other-host:port` (server CORS is
 permissive).
 
-Debug builds serve `dist/` from disk at runtime (rust-embed debug mode),
-so web changes only need a page reload — no rebuild, no restart.
+`dist/` is embedded at compile time in **both** debug and release builds
+(`rust-embed` is used without its `debug_mode` feature), so web changes
+need a `cargo build` and a stack restart — there is no hot reload in any
+build.
 
 ## Tests
 
@@ -125,11 +127,10 @@ Commit the updated `dist/proto/` (and `lib/grpc/rust-gen/src/proto/`).
   with `fromUserInput()` on receipt, send raw 8-digit strings.
 - `stripPrefix()` removes the scanner's `CMD,` echo from raw responses
   (`MDL,UBC125XLT` → `UBC125XLT`).
-- The stack script runs the **debug** binary, and rust-embed serves
-  `dist/` from disk in debug builds — so `dist/` edits only need a page
-  reload (no rebuild/restart). Rebuild only when Rust code changed
-  (`cargo build` + restart the stack). A release binary embeds the files
-  and needs a rebuild for web changes.
+- The stack script runs the prebuilt **debug** binary, but rust-embed (no
+  `debug_mode` feature) embeds `dist/` at compile time in debug **and**
+  release builds — so any web change needs `cargo build` + a stack
+  restart, same as a Rust change.
 - Focus events are suppressed while the browser window is unfocused, so
   modal field highlighting is driven explicitly (`setActive`), not by
   focus/blur alone.

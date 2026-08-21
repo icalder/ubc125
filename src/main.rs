@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match &cli.command {
         cmd::cli::Commands::Serve(args) => cmd::serve::run(args).await?,
         cmd::cli::Commands::Console(args) => cmd::console::run(args)?,
+        cmd::cli::Commands::AudioTone(args) => cmd::audio_tone::run(args).await?,
     }
     Ok(())
 }

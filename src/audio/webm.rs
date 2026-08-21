@@ -1,6 +1,7 @@
 //! WebM/EBML byte-stream segmenter for live audio capture.
 //!
-//! Splits a raw WebM byte stream (e.g. from `ffmpeg -f webm - pipe:1`) into
+//! Splits a raw WebM byte stream (the native muxer's output, or any
+//! `UBC125_AUDIO_CMD` source) into
 //! the units the browser MSE path needs:
 //!
 //! - one **init segment**: the EBML header, the (open, unknown-size) `Segment`
@@ -313,7 +314,7 @@ impl WebmSegmenter {
         let Some((size, size_len)) = read_vint_size(&rest[id_len..])? else {
             return Ok(false);
         };
-        Ok(self.take_cluster(id_len, size, size_len, segments)?)
+        self.take_cluster(id_len, size, size_len, segments)
     }
 
     /// Consume a complete Cluster element as a media segment.

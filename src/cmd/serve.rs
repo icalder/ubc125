@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::audio::{
-    AudioBroadcaster, CaptureSource, CommandSource, DEFAULT_AUDIO_DEVICE, FfmpegSource,
+    AlsaOpusSource, AudioBroadcaster, CaptureSource, CommandSource, DEFAULT_AUDIO_DEVICE,
 };
 use crate::scanner::ScannerClient;
 use crate::server;
@@ -31,13 +31,13 @@ pub struct ServeArgs {
     #[arg(long, env = "UBC125_AUDIO_DEVICE", default_value = DEFAULT_AUDIO_DEVICE)]
     pub audio_device: String,
     /// Test hook (not user config): run this shell command line instead of
-    /// the default ffmpeg capture; its stdout is the WebM byte stream.
+    /// the native capture; its stdout is the WebM byte stream.
     #[arg(long, env = "UBC125_AUDIO_CMD", hide = true)]
     pub audio_cmd: Option<String>,
 }
 
-/// Pick the capture source: the D1 test hook command if given, else the
-/// production ALSA → Opus → WebM ffmpeg pipeline.
+/// Pick the capture source: the test hook command if given, else the
+/// production ALSA → Opus → WebM native pipeline.
 fn audio_source(args: &ServeArgs) -> Arc<dyn CaptureSource> {
     match &args.audio_cmd {
         Some(cmd) => Arc::new(CommandSource::new(vec![
@@ -45,7 +45,7 @@ fn audio_source(args: &ServeArgs) -> Arc<dyn CaptureSource> {
             "-c".to_string(),
             cmd.clone(),
         ])),
-        None => Arc::new(FfmpegSource::new(&args.audio_device)),
+        None => Arc::new(AlsaOpusSource::new(&args.audio_device)),
     }
 }
 
@@ -104,8 +104,8 @@ pub async fn run(args: &ServeArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("gRPC (grpcurl):  grpc://{}", args.server_addr);
     eprintln!("Use -d for debug logging.");
 
-    // ctrl-c: stop accepting, drain in-flight streams, then kill the capture
-    // so ffmpeg cannot keep the ALSA device across a restart.
+    // ctrl-c: stop accepting, drain in-flight streams, then stop the capture
+    // so it cannot keep the ALSA device across a restart.
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };

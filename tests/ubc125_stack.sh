@@ -8,8 +8,8 @@
 # Audio (D1): UBC125_AUDIO_CMD / UBC125_AUDIO_DEVICE exported by the caller
 # are inherited by `ubc125 serve` (the hidden --audio-cmd hook), so e.g.
 #   UBC125_AUDIO_CMD="cat /tmp/cap.webm" bash tests/ubc125_stack.sh
-# serves that file as the audio source. No audio env -> the default ALSA
-# ffmpeg command (fails on dev boxes without hw:2; fine for non-audio tests).
+# serves that file as the audio source. No audio env -> the default native
+# ALSA capture (fails on dev boxes without hw:2; fine for non-audio tests).
 set -u
 # socat is not on the default PATH; re-exec under a nix env that has it.
 if ! command -v socat >/dev/null 2>&1; then
