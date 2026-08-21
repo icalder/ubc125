@@ -77,6 +77,11 @@ pub struct GetStatusResponse {
     pub raw_response: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub modulation: ::prost::alloc::string::String,
+    /// Enabled scan banks, index 0 = bank 1 (same shape as
+    /// GetEnabledBanksResponse). Updated on SetEnabledBanks and by a slow
+    /// radio re-read, so every subscriber sees the current mask.
+    #[prost(bool, repeated, tag = "7")]
+    pub banks: ::prost::alloc::vec::Vec<bool>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Channel {
@@ -1104,6 +1109,9 @@ pub mod scanner_control_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Polled status stream. Each message also carries the bank mask the
+        /// server currently believes, so a SetEnabledBanks from one client
+        /// (or a bank button pressed on the unit) reaches all subscribers.
         pub async fn get_status(
             &mut self,
             request: impl tonic::IntoRequest<super::GetStatusRequest>,
@@ -1288,6 +1296,9 @@ pub mod scanner_control_service_server {
             >
             + std::marker::Send
             + 'static;
+        /// Polled status stream. Each message also carries the bank mask the
+        /// server currently believes, so a SetEnabledBanks from one client
+        /// (or a bank button pressed on the unit) reaches all subscribers.
         async fn get_status(
             &self,
             request: tonic::Request<super::GetStatusRequest>,

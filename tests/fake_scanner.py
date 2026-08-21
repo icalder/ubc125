@@ -24,6 +24,10 @@ def send(s: str) -> None:
 # empty (zero frequency), matching how get_bank_channels detects holes.
 channels = {}
 deleted = set()
+# Bank enable mask ('0' = enabled, '1' = disabled; index 0 = bank 1).
+# Persisted across SCG writes so a read reflects the latest write —
+# multi-client tests (web_bank_sync_test.mjs) need both clients to agree.
+banks = "0101010101"
 
 
 def channel(idx: str):
@@ -51,8 +55,14 @@ while True:
             send("VER,Version 1.00.00")
         elif name == "GLG":
             send("GLG,01239750,AM,,0,,,BHX RADAR,1,0,,52,")
-        elif name == "SCG" and cmd == "SCG":
-            send("SCG,0101010101")
+        elif name == "SCG":
+            if cmd == "SCG":  # read
+                send(f"SCG,{banks}")
+            else:  # write: SCG,##########
+                digits = cmd.split(",")[1]
+                if len(digits) == 10 and set(digits) <= {"0", "1"}:
+                    banks = digits
+                send(cmd)
         elif name == "CIN":
             parts = cmd.split(",")
             if len(parts) == 2:  # read
@@ -75,7 +85,7 @@ while True:
             send("VOL,15" if "," not in cmd else cmd)
         elif name == "SQL":
             send("SQL,05" if "," not in cmd else cmd)
-        elif name in ("PRG", "EPG", "KEY", "SCG"):
-            send(cmd if name == "SCG" else name)
+        elif name in ("PRG", "EPG", "KEY"):
+            send(name)
         else:
             send("NG")

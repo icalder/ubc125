@@ -56,6 +56,18 @@ install):
   alternately on both tabs (49/80 and 24/80 samples) because each new
   `GetStatus` stream cancelled the previous singleton poller.
 
+- `web_bank_sync_test.mjs` (W5, **bank-sync regression**, ~20 s): two
+  tabs; a scan-bank chip toggled in tab 1 must appear in tab 2's
+  "Active Banks" box within a 10 s window (and both stay live). The fake
+  scanner persists the SCG bank mask across reads/writes so the change is
+  what a re-read would see. Pre-fix the sync check failed: `state.banks`
+  was loaded once on page load and the `GetStatus` stream carried no bank
+  mask, so tab 2 kept the stale chips (9/11). The fix rides the shared
+  status poller: `GetStatusResponse.banks` carries the server's current
+  mask (fast-forwarded by `SetEnabledBanks`, slow-refreshed from the radio
+  every 30 s), and the client updates `state.banks` per stream message —
+  convergence is one poll (250 ms), far inside the 10 s window.
+
 - `web_hw_test.mjs` (W6, real scanner): W5 items 1–9 minus the offline
   part, plus the delete-restore round-trip on channel 63 (factory
   "BHX RADAR" 123.9750 AM): delete → row cleared → re-enter exact values
@@ -118,3 +130,10 @@ install):
   its playhead stalled at 0 — silent until the generation reset (the
   two-browser symptom reported on the Pi). Same session: W5 pointer path
   **26/26**, two-tab status **8/8**, web unit tests 33 pass.
+- 2026-08-21 (bank-sync, pre-fix): `web_bank_sync_test.mjs` added —
+  **9/11 pass** on the current build; the two tab-2 sync checks fail
+  (tab 2's Active Banks chips never reflect tab 1's SCG write).
+- 2026-08-21 (bank-sync fix, mask over the status stream): bank sync
+  **11/11** (tab 2 converges within one 250 ms poll). Same session: W5
+  pointer path **26/26**, two-tab status **8/8**, offline banner + 390×844
+  checks **10/10**; Rust `cargo test`: 142 passed.

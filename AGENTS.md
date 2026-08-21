@@ -38,7 +38,7 @@ The server enables `accept_http1`, a permissive CORS layer, and per-service `Grp
 
 ### Web UI
 
-A vanilla-ESM browser console (no framework, no build step) in [web/](./web/README.md).  It mimics the terminal console: Monitor view (scanner info, live amber scan box from the `GetStatus` stream, tappable bank toggles, Scan/Hold, Play/Stop audio with a coloured state label) plus ten Bank views (50-row channel table, tap-to-select cursor, edit modal, delete confirm).  Audio plays through `lib/audio.js` (MediaSource/SourceBuffer, attached via `URL.createObjectURL` — Chromium rejects `srcObject` for main-thread `MediaSource`; bounded buffer, backoff reconnect).  Every action works by key *and* by pointer/touch; the layout is responsive from 390 px phones to desktop.  `web/dist` is committed and embedded — the Nix build stays node-free.  Browser E2E scripts live in [tests/web/](./tests/web_e2e.md).
+A vanilla-ESM browser console (no framework, no build step) in [web/](./web/README.md).  It mimics the terminal console: Monitor view (scanner info, live amber scan box from the `GetStatus` stream, tappable bank toggles, Scan/Hold, Play/Stop audio with a coloured state label) plus ten Bank views.  The `GetStatus` stream also carries the bank mask (`GetStatusResponse.banks`), so a bank toggle in one tab/browser reaches every other connected tab within one poll (250 ms); the client refreshes `state.banks` from each stream message (50-row channel table, tap-to-select cursor, edit modal, delete confirm).  Audio plays through `lib/audio.js` (MediaSource/SourceBuffer, attached via `URL.createObjectURL` — Chromium rejects `srcObject` for main-thread `MediaSource`; bounded buffer, backoff reconnect).  Every action works by key *and* by pointer/touch; the layout is responsive from 390 px phones to desktop.  `web/dist` is committed and embedded — the Nix build stays node-free.  Browser E2E scripts live in [tests/web/](./tests/web_e2e.md).
 
 ### Testing the Web UI
 
@@ -57,6 +57,7 @@ Two layers (details in [web/README.md](./web/README.md) and [tests/web_e2e.md](.
    node tests/web/web_pointer_test.mjs        # 1280x720 pointer path (26 checks)
    node tests/web/web_hiccup_phone_test.mjs   # offline banner + 390x844 phone (10 checks)
    node tests/web/web_two_tabs_test.mjs       # KI-2: two tabs both stay ONLINE (8 checks, ~25 s)
+   node tests/web/web_bank_sync_test.mjs      # bank-sync: tab 1's bank toggle must reach tab 2 (11 checks, ~20 s)
    node tests/web/web_audio_test.mjs   # audio Play/Stop + throttle + late joiner (22 checks, ~3 min; needs target/debug/ubc125, manages the stack itself)
    ```
 
@@ -109,6 +110,7 @@ UBC125_REGEN=1 cargo build -p ubc125-grpc
 - Communication/validation failures surface as `ScannerError`; the gRPC server maps it to status codes (`invalid_argument` / `unavailable` / `internal`).
 - Scanner response parsing (GLG, CIN, SCG) and domain types (`Frequency`, `Channel`, `ChannelIndex`, `BankMask`, `ScanStatus`) live in [types.rs](./src/types.rs).
 - The gRPC server shares one client behind `Arc<Mutex<ScannerClient>>`; blocking serial I/O runs in `spawn_blocking`.
+- Status: `src/status.rs` — `StatusBroadcaster` runs one shared `GLG` poll task for any number of `GetStatus` subscribers (first starts it, last stops it, KI-2). Each broadcast is a `StatusUpdate { status, banks }`: the bank mask is cached server-side, fast-forwarded by `SetEnabledBanks`/`GetEnabledBanks`, and re-read from the radio every 120th poll (~30 s) so bank buttons pressed on the unit itself also reach the clients.
 - Audio: `src/audio/` — `native.rs` runs the capture natively (ALSA `PcmReader` → `FrameSplitter` → `OpusFrameEncoder` → `WebmMuxer`, no child process; `AlsaOpusSource` for the device, `ToneSource`/`audio-tone` for tests), `source.rs` holds the `CaptureSource` trait + `CommandSource` (`UBC125_AUDIO_CMD` override), `webm.rs` splits the stream into cluster-sized segments, `broadcaster.rs` fans the segments out to `Listen` subscribers (per-subscriber bounded queue with send timeout; id-gated start/stop so one client's `StopCapture` cannot kill another's).
 
 ## Documentation

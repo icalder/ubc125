@@ -6,8 +6,8 @@ use tonic::{Request, Response, Status};
 use crate::audio::{AudioBroadcaster, AudioError, AudioEvent, AudioSubscription};
 use crate::constants::NUM_BANKS;
 use crate::scanner::{ScannerClient, ScannerError};
-use crate::status::{StatusBroadcaster, StatusSubscription};
-use crate::types::{BankMask, Channel, Frequency, Modulation, ScanStatus};
+use crate::status::{StatusBroadcaster, StatusSubscription, StatusUpdate};
+use crate::types::{BankMask, Channel, Frequency, Modulation};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use ubc125_grpc::ubc125::v1::audio_service_server::AudioService;
@@ -24,16 +24,18 @@ use ubc125_grpc::ubc125::v1::{
     StartScanRequest, StartScanResponse, SubscribeAudioRequest,
 };
 
-/// Domain -> proto conversion for a scan status.
-impl From<ScanStatus> for GetStatusResponse {
-    fn from(s: ScanStatus) -> Self {
+/// Domain -> proto conversion for a status update (GLG + bank mask), so
+/// every subscriber sees the mask the server currently believes.
+impl From<StatusUpdate> for GetStatusResponse {
+    fn from(u: StatusUpdate) -> Self {
         Self {
-            frequency: s.frequency.to_string(),
-            bank: s.bank_display(),
-            channel_name: s.channel_name,
-            signal_detected: s.signal_detected,
-            raw_response: s.raw,
-            modulation: s.modulation.to_string(),
+            frequency: u.status.frequency.to_string(),
+            bank: u.status.bank_display(),
+            channel_name: u.status.channel_name,
+            signal_detected: u.status.signal_detected,
+            raw_response: u.status.raw,
+            modulation: u.status.modulation.to_string(),
+            banks: u.banks.iter().map(|(_, enabled)| enabled).collect(),
         }
     }
 }
@@ -195,6 +197,8 @@ impl ScannerControlService for ScannerServer {
         _request: Request<GetEnabledBanksRequest>,
     ) -> Result<Response<GetEnabledBanksResponse>, Status> {
         let mask = with_scanner(self.client.clone(), |client| client.get_banks()).await?;
+        // An authoritative read refreshes the status stream's cache.
+        self.status.set_banks(&mask);
         Ok(Response::new(GetEnabledBanksResponse {
             banks: mask.iter().map(|(_, enabled)| enabled).collect(),
         }))
@@ -212,15 +216,25 @@ impl ScannerControlService for ScannerServer {
             )));
         }
         let mask = BankMask::from_states(req.banks);
+        // A copy for the status-stream cache below: `mask` moves into the
+        // scanner call.
+        let streamed_mask = mask.clone();
         with_scanner(self.client.clone(), move |client| client.set_banks(&mask)).await?;
+        // Fast-forward the status stream's bank cache so every other
+        // subscriber sees the new mask on the next poll (the poller's slow
+        // radio refresh is the backstop).
+        self.status.set_banks(&streamed_mask);
         Ok(Response::new(SetEnabledBanksResponse {}))
     }
 
     /// Stream the scanner's status, polled every `POLL_INTERVAL_MS` by a
     /// poller shared by all `GetStatus` subscribers (started by the first,
     /// stopped by the last). A client joining mid-generation gets the last
-    /// polled status up front, then the live values. Transient poll errors
-    /// are logged and skipped so a serial hiccup does not kill the streams.
+    /// polled status up front, then the live values. Each message also
+    /// carries the bank mask the server currently believes, so a
+    /// `SetEnabledBanks` from one client (or a bank button pressed on the
+    /// unit) reaches all subscribers. Transient poll errors are logged and
+    /// skipped so a serial hiccup does not kill the streams.
     async fn get_status(
         &self,
         _request: Request<GetStatusRequest>,
@@ -231,7 +245,7 @@ impl ScannerControlService for ScannerServer {
         // duplicate to skip.
         let pending_last = subscription
             .cached_status()
-            .map(|s| GetStatusResponse::from(s.clone()));
+            .map(|u| GetStatusResponse::from(u.clone()));
         let stream = StatusStream {
             events: BroadcastStream::new(subscription.resubscribe()),
             pending_last,
@@ -317,11 +331,11 @@ impl AudioServer {
     }
 }
 
-/// Server-streaming response for `GetStatus`: the cached status (for
+/// Server-streaming response for `GetStatus`: the cached update (for
 /// mid-generation joins), then one message per successful poll of the
 /// shared poller, until the poller stops.
 struct StatusStream {
-    events: BroadcastStream<ScanStatus>,
+    events: BroadcastStream<StatusUpdate>,
     /// Last polled status owed to this client before any live values.
     pending_last: Option<GetStatusResponse>,
     /// Keeps the subscriber slot alive for the stream's lifetime; dropping
@@ -344,8 +358,8 @@ impl Stream for StatusStream {
                 // ending the stream — ending it would flap the client's
                 // offline banner (KI-2).
                 Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(_)))) => continue,
-                Poll::Ready(Some(Ok(status))) => {
-                    return Poll::Ready(Some(Ok(GetStatusResponse::from(status))));
+                Poll::Ready(Some(Ok(update))) => {
+                    return Poll::Ready(Some(Ok(GetStatusResponse::from(update))));
                 }
                 // The poller stopped (channel closed): end the stream; the
                 // client reconnects, and a fresh poller starts if no other
@@ -457,10 +471,26 @@ mod tests {
     use crate::audio::source::FakeSource;
     use crate::audio::webm::fixtures::build_fixture;
     use crate::scanner::mock::{GLG_OK, mock_client};
+    use crate::types::ScanStatus;
     use std::time::Duration;
     use tokio::time::timeout;
     use tokio_stream::StreamExt;
     use tonic::Code;
+
+    /// A bank-mask read reply (alternating banks, like the fake scanner).
+    const SCG_ALT: &str = "SCG,0101010101";
+    /// One canned bank-refresh cycle: PRG, SCG reply, EPG, KEY,S,P reply.
+    const SCG_CYCLE: [&str; 4] = ["PRG", SCG_ALT, "EPG", "KEY"];
+    /// Canned responses for the poll-0 (GLG + bank refresh) plus `n` more
+    /// GLG polls.
+    fn canned_polls(n_glg_after_first: usize) -> Vec<&'static str> {
+        let mut responses = vec![GLG_OK];
+        responses.extend_from_slice(&SCG_CYCLE);
+        responses.extend(std::iter::repeat(GLG_OK).take(n_glg_after_first));
+        responses
+    }
+    /// The alternating mask `SCG_ALT` as the UI/server see it.
+    const BANKS_ALT: [bool; 10] = [true, false, true, false, true, false, true, false, true, false];
 
     /// A broadcaster over a looping WebM fixture (header once, clusters on).
     fn audio_test_broadcaster(clusters: usize) -> (Arc<AudioBroadcaster>, Arc<FakeSource>) {
@@ -552,13 +582,15 @@ mod tests {
     #[test]
     fn status_response_mapping() {
         let status = ScanStatus::parse_glg(GLG_OK).unwrap();
-        let proto = GetStatusResponse::from(status);
+        let banks = BankMask::from_scanner_response(SCG_ALT);
+        let proto = GetStatusResponse::from(StatusUpdate { status, banks });
         assert_eq!(proto.frequency, "123.9750");
         assert_eq!(proto.bank, "2");
         assert_eq!(proto.channel_name, "BHX RADAR");
         assert!(proto.signal_detected);
         assert_eq!(proto.modulation, "AM");
         assert_eq!(proto.raw_response, GLG_OK);
+        assert_eq!(proto.banks, BANKS_ALT.to_vec());
     }
 
     #[test]
@@ -604,16 +636,19 @@ mod tests {
 
     #[tokio::test]
     async fn get_status_streams_polls_and_survives_failures() {
-        let (client, _written) = mock_client(&[GLG_OK]);
+        let responses = canned_polls(0);
+        let (client, _written) = mock_client(&responses);
         let server = ScannerServer::new(client);
         let response = server
             .get_status(Request::new(GetStatusRequest {}))
             .await
             .unwrap();
         let mut stream = response.into_inner();
-        // First poll serves the canned response immediately.
+        // First poll serves the canned response immediately, with the
+        // bank mask from the poll-0 radio refresh.
         let first = stream.next().await.unwrap().unwrap();
         assert_eq!(first.frequency, "123.9750");
+        assert_eq!(first.banks, BANKS_ALT.to_vec());
         // Subsequent polls time out (mock exhausted) but the stream stays
         // alive: it must not end after a failed poll. We only verify the
         // first value above; drop the receiver to stop the poller.
@@ -621,9 +656,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_enabled_banks_reaches_subscribers_on_next_poll() {
+        // Poll 1: GLG + poll-0 bank refresh. The SetEnabledBanks
+        // round-trip (PRG, SCG<mask>, EPG, KEY,S,P) runs before poll 2's
+        // GLG: it is issued as soon as the first message is received.
+        let responses: Vec<&str> = [
+            GLG_OK, "PRG", SCG_ALT, "EPG", "KEY",
+            "PRG", "SCG,0000000000", "EPG", "KEY",
+            GLG_OK,
+        ]
+        .into_iter()
+        .collect();
+        let (client, _written) = mock_client(&responses);
+        let server = ScannerServer::new(client);
+        let response = server
+            .get_status(Request::new(GetStatusRequest {}))
+            .await
+            .unwrap();
+        let mut stream = response.into_inner();
+        let first = timeout(WAIT_AUDIO, stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.banks, BANKS_ALT.to_vec());
+        // Another client changes the mask...
+        server
+            .set_enabled_banks(Request::new(SetEnabledBanksRequest {
+                banks: vec![true; NUM_BANKS],
+            }))
+            .await
+            .unwrap();
+        // ...and this subscriber sees it on the very next poll.
+        let second = timeout(WAIT_AUDIO, stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            second.banks.iter().all(|b| *b),
+            "streamed mask after set: {:?}",
+            second.banks
+        );
+        drop(stream);
+    }
+
+    #[tokio::test]
     async fn get_status_subscribers_share_one_poller() {
-        // Three canned responses, then exhaustion.
-        let (client, written) = mock_client(&[GLG_OK, GLG_OK, GLG_OK]);
+        // Three canned GLG responses (plus the poll-0 bank refresh), then
+        // exhaustion.
+        let responses = canned_polls(3);
+        let (client, written) = mock_client(&responses);
         let server = ScannerServer::new(client);
         let response = server
             .get_status(Request::new(GetStatusRequest {}))
@@ -669,13 +752,17 @@ mod tests {
         }
         assert!(!server.status.is_active(), "poller did not stop");
         let sent: Vec<String> = written.lock().unwrap().clone();
-        // One poller served both clients: the three canned responses plus
-        // at most one in-flight poll after the stop.
-        assert!(
-            sent.iter().all(|c| c == "GLG\r"),
-            "unexpected commands: {sent:?}"
-        );
-        assert!(sent.len() <= 4, "unexpected poll count: {sent:?}");
+        // One poller served both clients: one bank refresh for its life
+        // (poll 0), and the three canned GLG polls plus at most one
+        // in-flight after the stop.
+        let count = |cmd: &str| {
+            sent
+                .iter()
+                .filter(|c| **c == format!("{cmd}\r"))
+                .count()
+        };
+        assert_eq!(count("SCG"), 1, "unexpected commands: {sent:?}");
+        assert!(count("GLG") <= 4, "unexpected poll count: {sent:?}");
     }
 
     // -- AudioService::Listen (6.7) --

@@ -18,6 +18,9 @@ service ScannerControlService {
   rpc HoldScan (HoldScanRequest) returns (HoldScanResponse);
   rpc GetEnabledBanks (GetEnabledBanksRequest) returns (GetEnabledBanksResponse);
   rpc SetEnabledBanks (SetEnabledBanksRequest) returns (SetEnabledBanksResponse);
+  // Polled status stream. Each message also carries the bank mask the
+  // server currently believes, so a SetEnabledBanks from one client
+  // (or a bank button pressed on the unit) reaches all subscribers.
   rpc GetStatus (GetStatusRequest) returns (stream GetStatusResponse);
   rpc GetChannel (GetChannelRequest) returns (GetChannelResponse);
   rpc SetChannel (SetChannelRequest) returns (SetChannelResponse);
@@ -87,6 +90,10 @@ message GetStatusResponse {
   bool signal_detected = 4;
   string raw_response = 5;
   string modulation = 6;
+  // Enabled scan banks, index 0 = bank 1 (same shape as
+  // GetEnabledBanksResponse). Updated on SetEnabledBanks and by a slow
+  // radio re-read, so every subscriber sees the current mask.
+  repeated bool banks = 7;
 }
 
 message Channel {

@@ -15,6 +15,13 @@
 //! - when the last subscriber leaves the poller stops, with a short grace
 //!   window in which a rejoining subscriber cancels the stop.
 //!
+//! Bank mask: each broadcast carries the mask the server currently believes
+//! (`StatusUpdate.banks`). The poller re-reads it from the radio every
+//! `BANKS_REFRESH_EVERY` polls (bank buttons pressed on the unit itself),
+//! and `StatusBroadcaster::set_banks` fast-forwards it after a successful
+//! `SetEnabledBanks`, so a change made by any client reaches all subscribers
+//! on the very next poll.
+//!
 //! Transient poll errors are logged and skipped so a serial hiccup does not
 //! end the streams (the stream itself is the clients' liveness signal).
 
@@ -27,7 +34,7 @@ use tracing::{info, warn};
 
 use crate::constants::POLL_INTERVAL_MS;
 use crate::scanner::ScannerClient;
-use crate::types::ScanStatus;
+use crate::types::{BankMask, ScanStatus};
 
 /// Broadcast channel capacity: 64 statuses = 16 s at the 250 ms poll
 /// cadence. A receiver that falls further behind gets `Lagged` and its
@@ -35,20 +42,36 @@ use crate::types::ScanStatus;
 /// log, so skipping is harmless (and ending the stream on lag would flap
 /// the client's offline banner, the very symptom KI-2 fixes).
 const BROADCAST_CAPACITY: usize = 64;
+/// Every Nth poll (counting from the first) re-reads the bank mask from
+/// the radio, so bank buttons pressed on the unit itself reach the clients.
+/// The PRG/SCG/EPG program-mode round-trip is far too frequent for the
+/// 250 ms GLG cadence; 120 polls ≈ 30 s.
+const BANKS_REFRESH_EVERY: u64 = 120;
 /// Grace window between the last subscriber leaving and the poll task
 /// stopping; a subscriber joining inside it cancels the stop.
 const STOP_JOIN_GRACE: Duration = Duration::from_millis(100);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// One broadcast status: the polled GLG plus the bank mask the server
+/// currently believes. The mask is cached (it is not part of the GLG
+/// reply): the poller refreshes it from the radio every
+/// `BANKS_REFRESH_EVERY` polls, and `StatusBroadcaster::set_banks`
+/// fast-forwards it after a successful `SetEnabledBanks`.
+#[derive(Clone, Debug)]
+pub struct StatusUpdate {
+    pub status: ScanStatus,
+    pub banks: BankMask,
+}
+
 /// One active poller: the shared broadcast sender and subscriber
 /// accounting.
 struct Active {
     id: u64,
-    sender: broadcast::Sender<ScanStatus>,
+    sender: broadcast::Sender<StatusUpdate>,
     subscribers: usize,
-    /// Last successfully polled status, handed to late joiners (a new
+    /// Last successfully polled update, handed to late joiners (a new
     /// broadcast receiver starts at the channel tail and sees no history).
-    last: Option<ScanStatus>,
+    last: Option<StatusUpdate>,
     /// A stop is pending (last subscriber left); a rejoin resets it.
     stopping: bool,
     /// Set by the stop task after the grace window; the poll task exits at
@@ -71,6 +94,18 @@ struct Inner {
     create: tokio::sync::Mutex<()>,
     state: StdMutex<State>,
     next_id: AtomicU64,
+    /// Bank mask the poller stamps onto each broadcast; refreshed from the
+    /// radio (slow) and by `set_banks` (fast). Shared across generations so
+    /// a new poller inherits the last known mask.
+    banks: StdMutex<BankMask>,
+    /// Polls between bank-mask radio refreshes (see `BANKS_REFRESH_EVERY`).
+    refresh_every: u64,
+}
+
+/// Lock the bank cache, recovering from poison (a panic elsewhere must not
+/// wedge the poller).
+fn lock_banks(banks: &StdMutex<BankMask>) -> MutexGuard<'_, BankMask> {
+    banks.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Inner {
@@ -88,14 +123,33 @@ pub struct StatusBroadcaster {
 
 impl StatusBroadcaster {
     pub fn new(client: Arc<StdMutex<ScannerClient>>) -> Self {
+        Self::new_with_refresh_every(client, BANKS_REFRESH_EVERY)
+    }
+
+    /// Same as [`Self::new`] with a custom radio-refresh interval; the
+    /// production cadence is the `BANKS_REFRESH_EVERY` constant.
+    fn new_with_refresh_every(
+        client: Arc<StdMutex<ScannerClient>>,
+        refresh_every: u64,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 client,
                 create: tokio::sync::Mutex::new(()),
                 state: StdMutex::new(State { generation: None }),
                 next_id: AtomicU64::new(1),
+                banks: StdMutex::new(BankMask::new()),
+                refresh_every,
             }),
         }
+    }
+
+    /// Update the cached bank mask so every subscriber sees it on the very
+    /// next poll, without waiting for the slow radio refresh. Called after
+    /// an authoritative read/write of the mask (`SetEnabledBanks`,
+    /// `GetEnabledBanks`).
+    pub fn set_banks(&self, mask: &BankMask) {
+        *lock_banks(&self.inner.banks) = mask.clone();
     }
 
     /// True while a poll task is running (or in its stop grace window).
@@ -184,24 +238,24 @@ pub struct StatusSubscription {
     /// Keeps the channel alive; also the source of fresh receivers. A
     /// `Receiver` is deliberately not stored here: see the audio
     /// broadcaster's group 5 findings on unpolled receivers.
-    sender: broadcast::Sender<ScanStatus>,
-    /// Join-time snapshot of the last polled status (late-joiner fast
+    sender: broadcast::Sender<StatusUpdate>,
+    /// Join-time snapshot of the last polled update (late-joiner fast
     /// path; the channel itself delivers only values sent after join).
-    last: Option<ScanStatus>,
+    last: Option<StatusUpdate>,
     inner: Arc<Inner>,
     gen_id: u64,
 }
 
 impl StatusSubscription {
-    /// The last polled status at join time, for clients that joined after
+    /// The last polled update at join time, for clients that joined after
     /// the poller started.
-    pub fn cached_status(&self) -> Option<&ScanStatus> {
+    pub fn cached_status(&self) -> Option<&StatusUpdate> {
         self.last.as_ref()
     }
 
     /// A fresh receiver bound to the generation's channel; it delivers
     /// only values sent after it was created.
-    pub fn resubscribe(&self) -> broadcast::Receiver<ScanStatus> {
+    pub fn resubscribe(&self) -> broadcast::Receiver<StatusUpdate> {
         self.sender.subscribe()
     }
 }
@@ -235,28 +289,41 @@ impl Drop for StatusSubscription {
 }
 
 /// One shared poll task: poll `GLG` every `POLL_INTERVAL_MS` and broadcast
-/// the result. Transient poll errors are logged and skipped. The task only
-/// ends when the stop task sets `poll_stop` (after the grace window) or the
-/// generation is cleared.
+/// the result, stamped with the current bank mask. Transient poll errors
+/// are logged and skipped. The task only ends when the stop task sets
+/// `poll_stop` (after the grace window) or the generation is cleared.
 async fn run_poller(
     inner: Arc<Inner>,
     gen_id: u64,
     client: Arc<StdMutex<ScannerClient>>,
-    sender: broadcast::Sender<ScanStatus>,
+    sender: broadcast::Sender<StatusUpdate>,
     poll_stop: Arc<AtomicBool>,
     poller_exited: Arc<AtomicBool>,
 ) {
+    let mut polls = 0;
     loop {
         if poll_stop.load(Ordering::Relaxed) || !generation_alive(&inner, gen_id) {
             break;
         }
-        if let Some(status) = poll_once(&client).await {
-            cache_last(&inner, gen_id, &status);
+        // The first poll (and every `refresh_every`-th after) re-reads the
+        // bank mask from the radio, so unit-side bank button presses reach
+        // the clients.
+        let refresh_banks = polls % inner.refresh_every == 0;
+        if let Some((status, banks)) = poll_once(&client, refresh_banks).await {
+            if let Some(banks) = banks {
+                *lock_banks(&inner.banks) = banks;
+            }
+            let update = StatusUpdate {
+                status,
+                banks: lock_banks(&inner.banks).clone(),
+            };
+            cache_last(&inner, gen_id, &update);
             // No consumer receivers (all streams gone, grace window
             // active): discard and keep polling so a rejoiner inside the
             // window finds a live poller.
-            let _ = sender.send(status);
+            let _ = sender.send(update);
         }
+        polls += 1;
         tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
     poller_exited.store(true, Ordering::Relaxed);
@@ -272,28 +339,45 @@ fn generation_alive(inner: &Inner, gen_id: u64) -> bool {
         .is_some_and(|a| a.id == gen_id)
 }
 
-/// Store the last polled status for late joiners. Id-gated: a stale poll
+/// Store the last polled update for late joiners. Id-gated: a stale poll
 /// from an old generation never overwrites a newer one's value.
-fn cache_last(inner: &Inner, gen_id: u64, status: &ScanStatus) {
+fn cache_last(inner: &Inner, gen_id: u64, update: &StatusUpdate) {
     let mut state = inner.state();
     if let Some(active) = state.generation.as_mut().filter(|a| a.id == gen_id) {
-        active.last = Some(status.clone());
+        active.last = Some(update.clone());
     }
 }
 
-/// One `GLG` round-trip on the blocking pool; `None` (with a warning) on
-/// transient failure.
-async fn poll_once(client: &Arc<StdMutex<ScannerClient>>) -> Option<ScanStatus> {
+/// One poll round-trip on the blocking pool: always `GLG`, plus — when
+/// `refresh_banks` — a best-effort `SCG` bank-mask read. A failed refresh
+/// keeps the GLG result (the cache stays untouched); a failed GLG poll
+/// returns `None` (with a warning).
+async fn poll_once(
+    client: &Arc<StdMutex<ScannerClient>>,
+    refresh_banks: bool,
+) -> Option<(ScanStatus, Option<BankMask>)> {
     let client = client.clone();
     let poll = tokio::task::spawn_blocking(move || {
         let mut scanner = client
             .lock()
             .map_err(|e| format!("scanner mutex poisoned: {e}"))?;
-        scanner.get_status().map_err(|e| e.to_string())
+        let status = scanner.get_status().map_err(|e| e.to_string())?;
+        let banks = if refresh_banks {
+            match scanner.get_banks() {
+                Ok(banks) => Some(banks),
+                Err(e) => {
+                    warn!("bank mask refresh failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Ok::<(ScanStatus, Option<BankMask>), String>((status, banks))
     })
     .await;
     match poll {
-        Ok(Ok(status)) => Some(status),
+        Ok(Ok(result)) => Some(result),
         Ok(Err(e)) => {
             warn!("GetStatus poll failed: {e}");
             None
@@ -368,12 +452,18 @@ mod tests {
         true
     }
 
-    /// Receive the next status, failing the test on timeout or channel
+    /// A bank-mask read reply used with the canned PRG/SCG/EPG/KEY,S,P
+    /// program-mode cycle (alternating banks, like the fake scanner).
+    const SCG_ALT: &str = "SCG,0101010101";
+    /// One canned bank-refresh cycle: PRG, SCG reply, EPG, KEY,S,P reply.
+    const SCG_CYCLE: [&str; 4] = ["PRG", SCG_ALT, "EPG", "KEY"];
+
+    /// Receive the next update, failing the test on timeout or channel
     /// close.
-    async fn next_status(rx: &mut broadcast::Receiver<ScanStatus>) -> ScanStatus {
+    async fn next_status(rx: &mut broadcast::Receiver<StatusUpdate>) -> StatusUpdate {
         loop {
             match timeout(WAIT, rx.recv()).await {
-                Ok(Ok(status)) => return status,
+                Ok(Ok(update)) => return update,
                 Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
                 _ => panic!("no status within {WAIT:?}"),
             }
@@ -397,29 +487,36 @@ mod tests {
 
     #[tokio::test]
     async fn first_subscriber_starts_exactly_one_poller() {
-        let (broadcaster, written) = status_broadcaster(&[GLG_OK]);
+        let mut responses = vec![GLG_OK];
+        responses.extend_from_slice(&SCG_CYCLE);
+        let (broadcaster, written) = status_broadcaster(&responses);
         assert!(!broadcaster.is_active());
         let sub = broadcaster.subscribe().await;
         let mut rx = sub.resubscribe();
         assert!(broadcaster.is_active());
         assert_eq!(broadcaster.generations_started(), 1);
-        let status = next_status(&mut rx).await;
-        assert_eq!(status.frequency.to_string(), "123.9750");
+        let update = next_status(&mut rx).await;
+        assert_eq!(update.status.frequency.to_string(), "123.9750");
+        // The first poll also refreshes the bank mask from the radio.
+        assert_eq!(update.banks, BankMask::from_scanner_response(SCG_ALT));
         drop(sub);
         assert!(
             wait_until(|| !broadcaster.is_active()).await,
             "poller did not stop after the last subscriber left"
         );
         assert_eq!(
-            written.lock().unwrap().len(),
-            1,
-            "exactly one poll before the poller stopped"
+            *written.lock().unwrap(),
+            vec!["GLG\r", "PRG\r", "SCG\r", "EPG\r", "KEY,S,P\r"],
+            "exactly one poll (GLG + the poll-0 bank refresh)"
         );
     }
 
     #[tokio::test]
     async fn two_subscribers_share_one_poller() {
-        let (broadcaster, _written) = status_broadcaster(&[GLG_OK, GLG_OK, GLG_OK]);
+        let mut responses = vec![GLG_OK];
+        responses.extend_from_slice(&SCG_CYCLE);
+        responses.extend_from_slice(&[GLG_OK, GLG_OK, GLG_OK]);
+        let (broadcaster, written) = status_broadcaster(&responses);
         let sub_a = broadcaster.subscribe().await;
         let mut rx_a = sub_a.resubscribe();
         next_status(&mut rx_a).await;
@@ -449,11 +546,25 @@ mod tests {
         );
         drop(sub_b);
         assert!(wait_until(|| !broadcaster.is_active()).await);
+        // One bank refresh for the poller's life (poll 0), and at most
+        // four GLG polls (three canned plus one in-flight after the stop).
+        let sent: Vec<String> = written.lock().unwrap().clone();
+        let count = |cmd: &str| {
+            sent
+                .iter()
+                .filter(|c| **c == format!("{cmd}\r"))
+                .count()
+        };
+        assert_eq!(count("SCG"), 1, "unexpected commands: {sent:?}");
+        assert!(count("GLG") <= 4, "unexpected poll count: {sent:?}");
     }
 
     #[tokio::test]
     async fn rejoin_during_grace_cancels_the_stop() {
-        let (broadcaster, _written) = status_broadcaster(&[GLG_OK, GLG_OK, GLG_OK]);
+        let mut responses = vec![GLG_OK];
+        responses.extend_from_slice(&SCG_CYCLE);
+        responses.push(GLG_OK);
+        let (broadcaster, _written) = status_broadcaster(&responses);
         let sub = broadcaster.subscribe().await;
         let mut rx = sub.resubscribe();
         next_status(&mut rx).await;
@@ -475,7 +586,10 @@ mod tests {
 
     #[tokio::test]
     async fn late_subscriber_gets_cached_status() {
-        let (broadcaster, _written) = status_broadcaster(&[GLG_OK, GLG_OK, GLG_OK]);
+        let mut responses = vec![GLG_OK];
+        responses.extend_from_slice(&SCG_CYCLE);
+        responses.extend_from_slice(&[GLG_OK, GLG_OK]);
+        let (broadcaster, _written) = status_broadcaster(&responses);
         let early = broadcaster.subscribe().await;
         let mut rx_early = early.resubscribe();
         // Let two polls land so there is a "last" status to cache.
@@ -486,15 +600,64 @@ mod tests {
         // The join-time snapshot is what a new stream sends first, so a
         // late joiner sees the current status immediately instead of
         // waiting for the next poll.
-        let status = late
+        let update = late
             .cached_status()
             .expect("late joiner must be handed the last polled status");
-        assert_eq!(status.frequency.to_string(), "123.9750");
+        assert_eq!(update.status.frequency.to_string(), "123.9750");
+        assert_eq!(update.banks, BankMask::from_scanner_response(SCG_ALT));
         // Its channel still receives subsequent live values.
         let mut rx_late = late.resubscribe();
         next_status(&mut rx_late).await;
         drop(early);
         drop(late);
+        assert!(wait_until(|| !broadcaster.is_active()).await);
+    }
+
+    #[tokio::test]
+    async fn set_banks_fast_forwards_the_streamed_mask() {
+        // Poll 1: GLG + poll-0 radio refresh. Poll 2: GLG only.
+        let mut responses = vec![GLG_OK];
+        responses.extend_from_slice(&SCG_CYCLE);
+        responses.push(GLG_OK);
+        let (broadcaster, _written) = status_broadcaster(&responses);
+        let sub = broadcaster.subscribe().await;
+        let mut rx = sub.resubscribe();
+        // The poll-0 refresh carries the radio's mask.
+        let first = next_status(&mut rx).await;
+        assert_eq!(first.banks, BankMask::from_scanner_response(SCG_ALT));
+        // A successful SetEnabledBanks must reach subscribers on the very
+        // next poll, long before the slow radio refresh.
+        let all_on = BankMask::new();
+        broadcaster.set_banks(&all_on);
+        let second = next_status(&mut rx).await;
+        assert_eq!(second.banks, all_on);
+        drop(sub);
+        assert!(wait_until(|| !broadcaster.is_active()).await);
+    }
+
+    #[tokio::test]
+    async fn radio_side_bank_change_reaches_subscribers_via_refresh() {
+        // refresh_every = 1 stands in for the production 120-poll cadence:
+        // every poll re-reads the mask, so a bank button pressed on the
+        // unit itself shows up on the very next poll.
+        let responses: Vec<&str> = [GLG_OK]
+            .into_iter()
+            .chain(SCG_CYCLE)
+            .chain([GLG_OK])
+            .chain(["PRG", "SCG,0000000000", "EPG", "KEY"])
+            .collect();
+        let (client, _written) = mock_client(&responses);
+        let broadcaster =
+            StatusBroadcaster::new_with_refresh_every(Arc::new(StdMutex::new(client)), 1);
+        let sub = broadcaster.subscribe().await;
+        let mut rx = sub.resubscribe();
+        let first = next_status(&mut rx).await;
+        assert_eq!(first.banks, BankMask::from_scanner_response(SCG_ALT));
+        // The radio now answers with all banks enabled (a button press);
+        // the next poll's refresh must pick it up.
+        let second = next_status(&mut rx).await;
+        assert_eq!(second.banks, BankMask::from_scanner_response("SCG,0000000000"));
+        drop(sub);
         assert!(wait_until(|| !broadcaster.is_active()).await);
     }
 }

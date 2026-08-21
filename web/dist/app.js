@@ -163,6 +163,10 @@ async function streamStatus() {
           raw: s.rawResponse,
           modulation: s.modulation,
         };
+        // The stream carries the server's current bank mask, so a
+        // SetEnabledBanks from another tab (or a bank button pressed on
+        // the unit) re-renders the Active Banks chips here.
+        state.banks = s.banks.slice(0, NUM_BANKS);
         backoff = INITIAL_BACKOFF;
         render();
       }
