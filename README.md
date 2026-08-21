@@ -15,6 +15,40 @@ nix-copy-closure --to itcalde@alarmpi ./result
 /nix/store/zhrs4vfqph0vikr4v93g2z3psy4xqp1j-ubc125-aarch64-unknown-linux-gnu-0.2.0/bin/ubc125 console
 ```
 
+## NixOS service (Pi)
+
+The flake ships a NixOS module (`nixosModules.default`) that runs `ubc125 serve` as a systemd service — no more copying the binary and babysitting it in `screen`:
+
+```nix
+# /etc/nixos/configuration.nix
+imports = [
+  (builtins.fetchTarball "https://github.com/<you>/ubc125/archive/<ref>.tar.gz")
+    + "/flake.nix" # or however you reference the flake
+];
+
+services.ubc125 = {
+  enable = true;
+  # listenAddress = "0.0.0.0:50051";  # default
+  # device = "/dev/ttyACM0";          # default: auto-detect by USB id
+  # audioDevice = "hw:2";             # default: the Pi's USB mic
+};
+```
+
+Then `nixos-rebuild switch` (on the Pi, which builds the aarch64 package for you) and:
+
+```sh
+systemctl status ubc125-serve
+journalctl -u ubc125-serve -f
+```
+
+Notes:
+
+- The service runs as a dynamic user with the `dialout` (ttyACM* access) and `audio` (ALSA mic capture) groups.
+- If the scanner is not connected at boot, `serve` fails and systemd retries every 10 s until it appears.
+- The web UI and gRPC/gRPC-Web listen on the same port (`0.0.0.0:50051` by default), so it is reachable from other machines on the LAN.
+
+For console mode (the Ratatui TUI) you still need a real TTY: `ssh -t itcalde@alarmpi .../ubc125 console` or a physical terminal.
+
 ## Minicom
 nix-shell -p minicom
 minicom --device /dev/ttyACM0

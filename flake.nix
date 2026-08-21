@@ -88,5 +88,70 @@
           };
         }
       );
+
+      # NixOS module: run `ubc125 serve` as a systemd service on the Pi.
+      nixosModules.default =
+        {
+          lib,
+          config,
+          pkgs,
+          ...
+        }:
+        let
+          cfg = config.services.ubc125;
+        in
+        {
+          options.services.ubc125 = {
+            enable = lib.mkEnableOption "the UBC125XLT scanner serve daemon (gRPC/gRPC-Web server)";
+
+            package = lib.mkOption {
+              type = lib.types.package;
+              default = self.packages.${pkgs.stdenv.hostPlatform.system}.ubc125;
+              description = "The ubc125 package to run";
+            };
+
+            listenAddress = lib.mkOption {
+              type = lib.types.str;
+              default = "0.0.0.0:50051";
+              description = "Address:port the gRPC/gRPC-Web server listens on";
+            };
+
+            device = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "Scanner serial device. An empty string auto-detects the port from the scanner's USB id (1965:0018).";
+            };
+
+            audioDevice = lib.mkOption {
+              type = lib.types.str;
+              default = "";
+              description = "ALSA capture device for the audio pipeline. An empty string uses the built-in default (the Pi's USB mic, card 2).";
+            };
+          };
+
+          config = lib.mkIf cfg.enable {
+            systemd.services.ubc125-serve = {
+              description = "UBC125XLT radio scanner gRPC server";
+              wantedBy = [ "multi-user.target" ];
+              after = [ "network.target" ];
+
+              serviceConfig = {
+                DynamicUser = true;
+                # dialout: open the scanner's ttyACM* port; audio: ALSA /
+                # dev/snd capture for the Listen stream. A static user would
+                # need `users.users.<name>.extraGroups = [ \"dialout\" \"audio\" ];`
+                # instead.
+                SupplementaryGroups = [ "dialout" "audio" ];
+                ExecStart = "${cfg.package}/bin/ubc125 serve --server-addr ${cfg.listenAddress}"
+                  + lib.optionalString (cfg.device != "") " --device ${cfg.device}"
+                  + lib.optionalString (cfg.audioDevice != "") " --audio-device ${cfg.audioDevice}";
+                # If the scanner is not (yet) connected, serve exits with an
+                # error and systemd retries every 10 s until it appears.
+                Restart = "on-failure";
+                RestartSec = "10s";
+              };
+            };
+          };
+        };
     };
 }
