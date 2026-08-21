@@ -75,6 +75,46 @@ export function audioTransition(state, event) {
 }
 
 /**
+ * The playhead position a late joiner must seek to, or null when no seek
+ * is needed.
+ *
+ * A client that joins a running generation receives clusters whose
+ * timecodes begin at the generation's elapsed time; its fresh playhead
+ * sits at 0 with nothing buffered there and would stall in silence
+ * forever while the UI shows "playing". Seeking to the earliest buffered
+ * data starts playback at the join point. A join at the head of the
+ * generation (buffer from 0) needs no seek.
+ *
+ * @param {number} bufferedStart the start (s) of the first buffered range
+ * @returns {number|null} the seek target, or null
+ */
+export function lateJoinSeek(bufferedStart) {
+  // 1 ms epsilon: a head join's first cluster has timecode 0; anything
+  // past the epsilon means we joined mid-generation.
+  return bufferedStart > 0.001 ? bufferedStart : null;
+}
+
+/**
+ * Decide whether a generation was joined at its head or mid-stream.
+ *
+ * The decision is made exactly once, from the FIRST non-empty buffered
+ * state of the generation, and is sticky. That matters because the
+ * buffer head-trim (which keeps ~3 s behind the playhead) moves
+ * `buffered.start(0)` forward on a head join seconds later; judging the
+ * join kind from a later observation would misread the trimmed head as a
+ * late join and seek the playhead back into already-played audio.
+ *
+ * @param {string|null} decision prior decision: "head", "late", or null
+ * @param {number|null} bufferedStart start of the first buffered range, or null when the buffer is still empty
+ * @returns {string|null} "head", "late", or null (still undecided)
+ */
+export function decideJoinKind(decision, bufferedStart) {
+  if (decision !== null) return decision;
+  if (bufferedStart === null) return null;
+  return bufferedStart > 0.001 ? "late" : "head";
+}
+
+/**
  * FIFO of chunks waiting to be appended to the SourceBuffer.
  *
  * Guarantees no media is ever queued before an init segment has been seen
@@ -155,6 +195,8 @@ export class AudioStream {
     this._msUrl = null; // object URL of the current MediaSource
     this._sb = null;
     this._sbReady = null; // Promise: current SourceBuffer is open
+    this._joinKind = null; // decided once per generation ("head"|"late")
+    this._seeked = false; // late-join seek issued for this generation
     this._wake = null; // waiter for the next queued chunk
     this._run = 0; // run id; stale loops observe a mismatch and exit
     this._lastTrim = 0;
@@ -256,6 +298,9 @@ export class AudioStream {
             await once(sb, "updateend");
             continue;
           }
+          // A late joiner's buffer starts at the generation's elapsed
+          // time; seek the playhead to the earliest available data.
+          if (this._seekIfNeeded()) continue;
           // A trim issues a remove(); the next pass must wait for its
           // updateend before appending (concurrent mutation throws).
           if (this._trimIfNeeded()) continue;
@@ -287,9 +332,33 @@ export class AudioStream {
     }
   }
 
+  /**
+   * Seek a late joiner's playhead to the earliest buffered data (see
+   * lateJoinSeek). At most once per generation, and only after the first
+   * append has been committed (the buffer is non-empty and not updating).
+   *
+   * @returns {boolean} true when a seek was issued.
+   */
+  _seekIfNeeded() {
+    if (this._seeked || this._joinKind === "head") return false;
+    const sb = this._sb;
+    const audio = this._audio;
+    if (!sb || !audio || sb.updating || sb.buffered.length === 0) return false;
+    // The first buffered data decides the join kind; head-trims later move
+    // buffered.start(0) without changing it (see decideJoinKind).
+    this._joinKind = decideJoinKind(this._joinKind, sb.buffered.start(0));
+    if (this._joinKind !== "late") return false;
+    const target = lateJoinSeek(sb.buffered.start(0));
+    this._seeked = true;
+    audio.currentTime = target;
+    return true;
+  }
+
   /** Start a fresh MediaSource for a new init segment (generation). */
   _beginGeneration() {
     this._discardGeneration();
+    this._joinKind = null; // a fresh generation gets a fresh decision
+    this._seeked = false; // the new generation starts at timecode 0
     const ms = new MediaSource();
     this._ms = ms;
     const audio = this._audio;

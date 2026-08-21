@@ -81,7 +81,14 @@ install):
      64 KiB/s download → broadcast lag → stream error → `reconnecting`
      observed (never `unavailable`) → unthrottle → `playing` → Stop, no
      leftover tone process
-  3. Regression: `web_pointer_test.mjs` 26/26 and
+  3. Phase C — late joiner (second browser): with tab 1 playing, tab 2
+     joins the running generation (trusted CDP click so autoplay really
+     starts the element) → `playing`; the playhead is the ground truth
+     (`window.__ubc125.audioStream._audio.currentTime` — the `<audio>`
+     element is detached, audibility is not DOM-observable): it must be
+     seeked into the stream (> 0 — pre-fix it stalls at 0 forever, see
+     `lateJoinSeek`) and then advance; tab 1 stays `playing`
+  4. Regression: `web_pointer_test.mjs` 26/26 and
      `web_hiccup_phone_test.mjs` 10/10 re-run green in the same session
      (both now open a fresh tab like the audio test — a stale-tab reuse
      intermittently dropped typed input).
@@ -104,3 +111,10 @@ install):
   (both tabs live, 0 OFFLINE-banner samples in 20 s). Negative control on
   the pre-fix build (`e1ace48`): banner flapping on both tabs — the check
   has teeth. Rust `cargo test`: 119 passed / 1 ignored.
+- 2026-08-21 (KI-3 fix, late audio joiner seek): W5 audio path **22/22
+  pass** — Phase C: the second browser joining a running generation is
+  seeked to the earliest buffered data (playhead in-stream and advancing),
+  first tab undisturbed. Pre-fix the late joiner showed "playing" with
+  its playhead stalled at 0 — silent until the generation reset (the
+  two-browser symptom reported on the Pi). Same session: W5 pointer path
+  **26/26**, two-tab status **8/8**, web unit tests 33 pass.

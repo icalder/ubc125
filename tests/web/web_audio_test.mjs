@@ -1,6 +1,6 @@
 // Audio browser E2E.
 //
-// Two phases against the fake-scanner stack with D1 audio sources:
+// Three phases against the fake-scanner stack with D1 audio sources:
 //
 //   A. Deterministic/offline: UBC125_AUDIO_CMD = tests/paced_file.py over
 //      /tmp/cap.webm (a finite WebM/Opus file, streamed over ~4 s — a bare
@@ -16,6 +16,14 @@
 //      keep up). With a 64 KB/s downlink the server-side broadcast channel
 //      lags, the stream ends as an error, and the client cycles through
 //      "reconnecting". Unthrottled, a generation flows to "playing".
+//
+//   C. Late joiner (second browser): a client that joins a running
+//      generation receives clusters whose timecodes begin at the
+//      generation's elapsed time; without the late-join seek its playhead
+//      stalls at 0 — silent, forever — while the label says "playing".
+//      The playhead is the ground truth (via the window.__ubc125 test
+//      seam): it must be seeked into the stream and then advance, and the
+//      first tab must be undisturbed.
 //
 // Prereqs: Edge launched by the browser-tools skill (CDP on :9222) and a
 // debug build of the binary (cargo build --bins); the stack script
@@ -176,6 +184,69 @@ ok(
   seenUnthrottled.includes("playing"),
   `unthrottled -> playing (saw: ${seenUnthrottled.join(" -> ")})`,
 );
+// -- phase C: late joiner (second browser) -----------------------------------
+
+const p2 = await b.newPage();
+await p2.setViewport({ width: 1280, height: 720 });
+const audioState2 = async () =>
+  p2.$eval(".audio-state", (e) => e.textContent.trim()).catch(() => null);
+const watchAudio2 = async (want, timeoutMs) => {
+  const seen = [];
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const s = await audioState2();
+    if (s && (seen.length === 0 || seen[seen.length - 1] !== s)) seen.push(s);
+    if (s === want) return seen;
+    await sleep(150);
+  }
+  return seen;
+};
+await p2.goto("http://127.0.0.1:50051/", { waitUntil: "networkidle2" });
+await sleep(1500);
+
+// Trusted click (CDP input, not the page's untrusted .click()) so the
+// autoplay policy really starts the element: the playhead checks below
+// are meaningless for a paused element.
+const play2 = await p2.evaluateHandle(() =>
+  [...document.querySelectorAll("button.btn")].find(
+    (x) => x.textContent.includes("Play") && !x.disabled
+  )
+);
+await play2.click();
+const seenLate = await watchAudio2("playing", 15000);
+ok(
+  seenLate.includes("playing"),
+  `late joiner reaches playing (saw: ${seenLate.join(" -> ")})`,
+);
+ok(
+  (await audioState()) === "playing",
+  "original tab still playing after the late joiner joined",
+);
+
+const playhead2 = () =>
+  p2.evaluate(() => {
+    const a = window.__ubc125?.audioStream?._audio;
+    return a ? a.currentTime : null;
+  });
+let t1 = null;
+const seekDeadline = Date.now() + 10000;
+while (Date.now() < seekDeadline) {
+  t1 = await playhead2();
+  if (t1 !== null && t1 > 0) break;
+  await sleep(200);
+}
+ok(
+  t1 !== null && t1 > 0,
+  `late joiner playhead seeked into the stream (t=${t1}s)`,
+);
+await sleep(600);
+const t2 = await playhead2();
+ok(t2 > t1, `late joiner playhead advances (t1=${t1}s, t2=${t2}s)`);
+
+// Before the Stop: a live tab 2 would re-subscribe to the next generation
+// and keep a tone source alive, failing the leftover-process check below.
+await p2.close();
+
 ok(await clickBtn("x: Stop"), "Stop clicked (unthrottled)");
 await watchAudio("off", 5000);
 await sleep(500);

@@ -90,6 +90,13 @@ discard/teardown.
   (a faster-than-real-time source without the cap wedges the tab). Trim and
   append must not interleave on one pass (`InvalidStateError`) —
   `_trimIfNeeded()` reports whether it trimmed and the loop `continue`s.
+- Late joiners: one capture generation serves all `Listen` subscribers,
+  and its cluster timecodes are absolute from generation start. A client
+  that joins mid-generation would sit with its playhead at 0 and nothing
+  buffered there — stalled and silent forever while the label says
+  "playing". After the first committed append, `_seekIfNeeded()` jumps the
+  playhead to `buffered.start(0)` (decision in pure `lateJoinSeek()`),
+  once per generation; a join at the head of the generation needs no seek.
 - On stream failure the state is `reconnecting` (bounded exponential
   backoff, `lib/backoff.js`), never `unavailable`, until the stream ends
   with a terminal error (e.g. capture stopped) — then Stop is re-enabled

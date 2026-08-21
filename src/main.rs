@@ -16,13 +16,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize tracing based on the debug flag:
     //   -d  -> DEBUG, -dd -> TRACE, default -> WARN
-    let level = match cli.debug {
-        0 => tracing::Level::WARN,
-        1 => tracing::Level::DEBUG,
-        _ => tracing::Level::TRACE,
+    // `RUST_LOG` overrides the flag so a single module can be debugged
+    // without the global spam (e.g. RUST_LOG=ubc125=debug keeps the h2
+    // frame trace at warn).
+    let default = match cli.debug {
+        0 => "warn",
+        1 => "debug",
+        _ => "trace",
     };
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| default.into());
     tracing_subscriber::fmt()
-        .with_max_level(level)
+        .with_env_filter(tracing_subscriber::EnvFilter::new(&filter))
         .with_ansi(false)
         .init();
 

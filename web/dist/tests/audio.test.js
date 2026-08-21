@@ -4,6 +4,8 @@ import {
   AUDIO_MIME,
   AUDIO_STATES,
   audioTransition,
+  lateJoinSeek,
+  decideJoinKind,
   ChunkQueue,
 } from "../lib/audio.js";
 
@@ -83,6 +85,46 @@ test("audioTransition: full session and reconnect cycle", () => {
   assert.equal(s, "playing");
   s = audioTransition(s, "stop");
   assert.equal(s, "off");
+});
+
+// -- late joiner seek --------------------------------------------------------
+
+test("lateJoinSeek: a join at the head of the generation needs no seek", () => {
+  assert.equal(lateJoinSeek(0), null);
+  // Sub-millisecond float noise is still "the head".
+  assert.equal(lateJoinSeek(0.0005), null);
+});
+
+test("lateJoinSeek: a mid-generation joiner seeks to the earliest data", () => {
+  // Joined after 30.2 s of capture: the buffer starts there.
+  assert.equal(lateJoinSeek(30.2), 30.2);
+  // Even one cluster (200 ms) late, the playhead would stall at 0.
+  assert.equal(lateJoinSeek(0.2), 0.2);
+});
+
+// -- join-kind decision ------------------------------------------------------
+
+test("decideJoinKind: undecided until the buffer has data", () => {
+  assert.equal(decideJoinKind(null, null), null);
+});
+
+test("decideJoinKind: first buffered data at 0 is a head join", () => {
+  assert.equal(decideJoinKind(null, 0), "head");
+  assert.equal(decideJoinKind(null, 0.0005), "head");
+});
+
+test("decideJoinKind: first buffered data past the epsilon is a late join", () => {
+  assert.equal(decideJoinKind(null, 0.2), "late");
+  assert.equal(decideJoinKind(null, 30.2), "late");
+});
+
+test("decideJoinKind: the decision is sticky once made (regression)", () => {
+  // A head join stays "head" even after head-trims move the buffer start
+  // forward; that is what previously misread as a late join and replayed
+  // the last ~3 s of audio.
+  assert.equal(decideJoinKind("head", 3.1), "head");
+  assert.equal(decideJoinKind("head", 29.7), "head");
+  assert.equal(decideJoinKind("late", 0), "late");
 });
 
 // -- chunk queue -------------------------------------------------------------

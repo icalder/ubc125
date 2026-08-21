@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{broadcast, mpsc};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::audio::source::{CaptureSource, SourceError, SourceEvent, SourceExit, StopHandle};
 use crate::audio::webm::{DEFAULT_MAX_SEGMENT_SIZE, Segment, WebmSegmenter};
@@ -168,6 +168,7 @@ impl AudioBroadcaster {
             if let Some(active) = &mut state.generation {
                 active.subscribers += 1;
                 active.stopping = false;
+                debug!(gen_id = active.id, "audio subscriber joined running generation");
                 return Ok(AudioSubscription {
                     sender: active.sender.clone(),
                     cached_init: active.cached_init.clone(),
@@ -198,6 +199,7 @@ impl AudioBroadcaster {
             active.stopping = true;
             (active.id, active.stop.clone())
         };
+        debug!(gen_id, "audio generation stopped (StopCapture)");
         stop.stop().await;
         // Id-gated: if the generation already ended (and a new one started),
         // leave the newer one alone.
@@ -246,7 +248,7 @@ impl AudioBroadcaster {
                 stopping: false,
             });
         }
-        info!("audio capture started");
+        info!(gen_id = id, "audio capture started");
         set_status(&self.inner, Some(id), Status::Starting);
         tokio::spawn(run_generation(
             Arc::clone(&self.inner),
@@ -306,6 +308,7 @@ impl Drop for AudioSubscription {
                 return;
             };
             active.subscribers = active.subscribers.saturating_sub(1);
+            debug!(gen_id, remaining = active.subscribers, "audio subscriber dropped");
             let is_last = active.subscribers == 0 && !shutdown;
             if is_last {
                 active.stopping = true;
@@ -466,6 +469,7 @@ async fn run_stop_task(inner: Arc<Inner>, gen_id: u64) {
         .as_ref()
         .filter(|a| a.id == gen_id)
         .map(|a| a.stop.clone());
+    debug!(gen_id, "audio generation stopped (last subscriber)");
     if let Some(stop) = stop {
         stop.stop().await;
     }
@@ -661,6 +665,96 @@ mod tests {
         next_media(&mut rx_late).await;
         drop(early);
         drop(late);
+        assert!(wait_until(|| source.stop_count() >= 1).await);
+    }
+
+    /// Two concurrent streams: the server-side contract the two-browser
+    /// (KI-3) scenario relies on. A is the starter; B joins while the
+    /// generation is running. B must get the cached init and then the
+    /// *live tail* of the generation — its first media is strictly newer
+    /// than A's current position (a fresh broadcast receiver can never be
+    /// replayed the first seconds) and close behind it. A is undisturbed,
+    /// and A's explicit StopCapture ends both streams.
+    #[tokio::test]
+    async fn late_joiner_stream_is_live_tail_not_replay() {
+        // 40 fixture clusters (~28 chunks) at 20 ms per chunk: a long,
+        // paced generation.
+        let (stream, init) = build_fixture(40);
+        let source = Arc::new(
+            FakeSource::new(stream)
+                .with_head(init.len())
+                .with_delay(Duration::from_millis(20)),
+        );
+        let broadcaster = AudioBroadcaster::new(source.clone());
+
+        // Stream A: the starter. Init, then a few media events.
+        let sub_a = broadcaster.subscribe().await.expect("subscribe a");
+        let mut rx_a = sub_a.resubscribe();
+        assert!(matches!(
+            next_event(&mut rx_a).await,
+            AudioEvent::Init(_, _)
+        ));
+        let mut a_last_ts = 0i64;
+        for _ in 0..5 {
+            let AudioEvent::Media(_, ts) = next_media(&mut rx_a).await else {
+                panic!("expected Media on A")
+            };
+            a_last_ts = ts;
+        }
+
+        // Stream B: the late joiner.
+        let sub_b = broadcaster.subscribe().await.expect("subscribe b");
+        assert!(
+            sub_b.cached_init().is_some(),
+            "late joiner must be handed the cached init"
+        );
+        let mut rx_b = sub_b.resubscribe();
+        let AudioEvent::Media(_, b_first_ts) = next_media(&mut rx_b).await else {
+            panic!("expected Media on B")
+        };
+
+        // No replay: B's first event is strictly newer than A's position —
+        // B cannot be handed the generation's first seconds.
+        assert!(
+            b_first_ts > a_last_ts,
+            "B first ts {b_first_ts} replayed A's past (A was at {a_last_ts})"
+        );
+        // Live tail: the gap is one chunk delay plus scheduling, not
+        // seconds of backfill.
+        assert!(
+            b_first_ts - a_last_ts <= 200,
+            "B first ts {b_first_ts} too far behind A (at {a_last_ts})"
+        );
+
+        // Both streams keep advancing. A chunk can carry two clusters, and
+        // the pump stamps both with the same millisecond, so per-event the
+        // timecode is non-decreasing and strict over a small window.
+        let mut a_prev = a_last_ts;
+        for _ in 0..4 {
+            let AudioEvent::Media(_, ts) = next_media(&mut rx_a).await else {
+                panic!("expected Media on A after B joined")
+            };
+            assert!(ts >= a_prev, "A timecodes must be non-decreasing ({ts} < {a_prev})");
+            a_prev = ts;
+        }
+        assert!(a_prev > a_last_ts, "A must advance over a window");
+        let mut b_prev = b_first_ts;
+        for _ in 0..4 {
+            let AudioEvent::Media(_, ts) = next_media(&mut rx_b).await else {
+                panic!("expected Media on B")
+            };
+            assert!(ts >= b_prev, "B timecodes must be non-decreasing ({ts} < {b_prev})");
+            b_prev = ts;
+        }
+        assert!(b_prev > b_first_ts, "B must advance over a window");
+
+        // A explicit StopCapture ends both streams.
+        broadcaster.stop_capture().await;
+        assert!(wait_for_failed(&mut rx_a).await, "A not failed after stop");
+        assert!(
+            wait_for_failed(&mut rx_b).await,
+            "B not failed after stop"
+        );
         assert!(wait_until(|| source.stop_count() >= 1).await);
     }
 

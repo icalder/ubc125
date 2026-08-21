@@ -57,7 +57,7 @@ Two layers (details in [web/README.md](./web/README.md) and [tests/web_e2e.md](.
    node tests/web/web_pointer_test.mjs        # 1280x720 pointer path (26 checks)
    node tests/web/web_hiccup_phone_test.mjs   # offline banner + 390x844 phone (10 checks)
    node tests/web/web_two_tabs_test.mjs       # KI-2: two tabs both stay ONLINE (8 checks, ~25 s)
-   node tests/web/web_audio_test.mjs   # audio Play/Stop + throttle (18 checks, ~2 min; needs target/debug/ubc125, manages the stack itself)
+   node tests/web/web_audio_test.mjs   # audio Play/Stop + throttle + late joiner (22 checks, ~3 min; needs target/debug/ubc125, manages the stack itself)
    ```
 
    `web_hiccup_phone_test.mjs` kills and restarts the fake stack itself. W6 (`tests/web/web_hw_test.mjs`) runs the same list against `serve --device /dev/ttyACM0` with round-trip-only writes; current pass counts are recorded in [tests/web_e2e.md](./tests/web_e2e.md).
@@ -68,6 +68,30 @@ Two layers (details in [web/README.md](./web/README.md) and [tests/web_e2e.md](.
 grpcurl -plaintext localhost:50051 ubc125.v1.SystemInfoService/GetModelInfo
 grpcurl -plaintext localhost:50051 ubc125.v1.SystemInfoService/GetFirmwareVersion
 ```
+
+### Audio diagnostics (CLI)
+
+[examples/audio_dump.rs](./examples/audio_dump.rs) is a tonic gRPC client for `AudioService/Listen` — the same bytes the server sends, without a browser. It is the bisection tool for audio problems: if the CLI is clean but a browser duplicates/stalls, the fault is client-side (MSE code or the grpc-web layer); if the CLI also misbehaves, the server bytes carry it.
+
+Positional args: `[addr] [prefix] [seconds] [streams] [join-delay-secs] [stopgap-secs] [play]` (defaults: `http://192.168.1.90:50051`, `/tmp/ubc125-dump`, `20`, `1`, `3`, `0`, off).
+
+- **Dump** (default): captures N streams (each after its join delay) for {seconds} s, writes `<prefix>_<n>.webm` + an in-process Opus-decoded `<prefix>_<n>.wav` (48 kHz mono), and reports per-cluster timecode continuity (byte-duplicates, overlaps, gaps) per stream plus a cross-stream report of whether a late stream joined live or replayed from 0.
+
+  ```sh
+  cargo run --example audio_dump http://192.168.1.90:50051 /tmp/dump 20 2 3   # two streams, second joins 3 s late
+  ```
+
+- **Play**: streams the decoded audio as a size-unknown WAV on stdout (progress on stderr) for by-ear testing through a local player — the CLI equivalent of the browser's Play button:
+
+  ```sh
+  cargo run --example audio_dump http://192.168.1.90:50051 /tmp/x 30 1 0 0 play | paplay
+  ```
+
+- **Stopgap** (6th arg > 0, single stream): plays {seconds} s, sends StopCapture, waits {stopgap} s (as audible silence in play mode), then plays a second generation for {seconds} s — reproduces the stop→play boundary:
+
+  ```sh
+  cargo run --example audio_dump http://192.168.1.90:50051 /tmp/x 12 1 0 2 play | paplay
+  ```
 
 ## gRPC code generation
 

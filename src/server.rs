@@ -422,8 +422,10 @@ impl AudioService for AudioServer {
         _request: Request<SubscribeAudioRequest>,
     ) -> Result<Response<Self::ListenStream>, Status> {
         let subscription = self.broadcaster.subscribe().await?;
-        // A join after the init was produced gets the cached copy up front;
-        // the channel's (replayed) init is then a duplicate.
+        // A join after the init was produced gets the cached copy up front.
+        // A fresh broadcast receiver only sees events sent after it was
+        // created, so the original init cannot reach it; skip_inits guards
+        // against a duplicate anyway.
         let (pending_init, skip_inits) = match subscription.cached_init() {
             Some(init) => (Some(init.to_vec()), true),
             None => (None, false),

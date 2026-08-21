@@ -52,6 +52,11 @@ const audioStream = new AudioStream(audioClient, {
   },
 });
 
+// Test seam for the browser E2E (tests/web/web_audio_test.mjs): audibility
+// is not observable from the DOM (the <audio> element is detached), so the
+// scripts inspect its playhead through this handle.
+window.__ubc125 = { audioStream };
+
 // -- DOM -------------------------------------------------------------------
 
 const appRoot = document.querySelector("#app");
