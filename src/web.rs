@@ -26,7 +26,11 @@ pub fn router() -> Router {
 
 /// Serve an embedded asset. Rejects paths that could escape the embedded
 /// dir; unknown files are 404.
-async fn serve_asset(path: &str) -> Response {
+///
+/// Synchronous on purpose: everything it does (embedded lookup, MIME
+/// guess, response build) is sync, so there is no `.await` to mislead
+/// readers about.
+fn serve_asset(path: &str) -> Response {
     let path = path.trim_start_matches('/');
     if path.is_empty() || path.contains("..") {
         return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
@@ -36,21 +40,23 @@ async fn serve_asset(path: &str) -> Response {
             let mime = mime_guess::from_path(path)
                 .first_or_octet_stream()
                 .to_string();
+            // A malformed MIME string must not panic the handler: fall
+            // back to the same body without the content-type header.
             Response::builder()
                 .header(header::CONTENT_TYPE, mime)
                 .body(Body::from(file.data.to_vec()))
-                .unwrap()
+                .unwrap_or_else(|_| Response::new(Body::from(file.data.to_vec())))
         }
         None => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
 async fn index() -> impl IntoResponse {
-    serve_asset("index.html").await
+    serve_asset("index.html")
 }
 
 async fn file(axum::extract::Path(path): axum::extract::Path<String>) -> impl IntoResponse {
-    serve_asset(&path).await
+    serve_asset(&path)
 }
 
 #[cfg(test)]

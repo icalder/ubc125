@@ -85,7 +85,7 @@ async fn run() {
             // One sink across both generations: a single WAV stream with
             // real silence during the gap (keeps idle-pipe players alive
             // and mirrors the browser's stop->play experience).
-            let sink: Option<SharedSink> = play.then(|| make_play_sink("s0a"));
+            let sink: Option<SharedSink> = play.then(|| make_play_sink("s0a")).flatten();
             let a = dump_stream(
                 client.clone(),
                 prefix_i.clone(),
@@ -95,20 +95,27 @@ async fn run() {
             )
             .await;
             eprintln!("stopgap: StopCapture after phase a; {stopgap}s of silence; then a new generation");
-            client
+            if let Err(e) = client
                 .stop_capture(ubc125_grpc::ubc125::v1::StopCaptureRequest::default())
                 .await
-                .expect("stop_capture");
+            {
+                eprintln!("stopgap: StopCapture failed: {e} (phase b may join the same generation)");
+            }
             if let Some(s) = &sink {
                 let mut g = s.lock().unwrap();
                 let chunk = [0u8; 4096]; // 205 ms of silence
                 let mut remaining = (stopgap * 48_000 * 2) as usize;
                 while remaining > 0 {
                     let n = chunk.len().min(remaining);
-                    g.write_all(&chunk[..n]).expect("write gap silence");
+                    if g.write_all(&chunk[..n]).is_err() {
+                        eprintln!("stopgap: writing gap silence failed (player closed?); continuing");
+                        break;
+                    }
                     remaining -= n;
                 }
-                g.flush().expect("flush gap silence");
+                if g.flush().is_err() {
+                    eprintln!("stopgap: flushing gap silence failed (player closed?)");
+                }
             }
             tokio::time::sleep(Duration::from_secs(stopgap)).await;
             let b = dump_stream(client, prefix_i, "s0b".into(), secs, sink.clone()).await;
@@ -123,7 +130,7 @@ async fn run() {
                     tokio::time::sleep(Duration::from_secs(join_delay)).await;
                 }
                 let name = i.to_string();
-                let sink: Option<SharedSink> = play.then(|| make_play_sink(&name));
+                let sink: Option<SharedSink> = play.then(|| make_play_sink(&name)).flatten();
                 vec![dump_stream(client, prefix_i, name, secs, sink).await]
             }));
         }
@@ -169,17 +176,20 @@ async fn run() {
 /// Live playback sink: a streaming WAV (48 kHz mono s16le, unknown size —
 /// the 0xFFFFFFFF convention) on stdout, to be piped into a local player
 /// (`paplay`, `ffplay -i pipe:0 -`). Progress markers go to stderr, so the
-/// pipe stays clean.
-fn make_play_sink(name: &str) -> SharedSink {
+/// pipe stays clean. Returns `None` if the header cannot be written (the
+/// player is not there); playback is then skipped.
+fn make_play_sink(name: &str) -> Option<SharedSink> {
     if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         eprintln!("stream {name}: WARNING: stdout is a terminal; pipe it into a player, e.g. | paplay");
     } else {
         eprintln!("stream {name}: live WAV (48 kHz mono s16le) on stdout");
     }
     let mut out = std::io::BufWriter::new(std::io::stdout());
-    write_wav_header(&mut out, u32::MAX).expect("wav header");
-    out.flush().expect("flush wav header");
-    Arc::new(Mutex::new(Box::new(out)))
+    if write_wav_header(&mut out, u32::MAX).is_err() || out.flush().is_err() {
+        eprintln!("stream {name}: cannot write the WAV header to stdout; skipping playback");
+        return None;
+    }
+    Some(Arc::new(Mutex::new(Box::new(out))))
 }
 
 /// A 44-byte WAV header; `data_size` is 0xFFFFFFFF for streaming.
@@ -273,8 +283,17 @@ async fn dump_stream(
         }
     };
 
-    let mut webm = (!play)
-        .then(|| std::io::BufWriter::new(std::fs::File::create(&webm_path).expect("webm file")));
+    let mut webm: Option<std::io::BufWriter<std::fs::File>> = if play {
+        None
+    } else {
+        match std::fs::File::create(&webm_path) {
+            Ok(f) => Some(std::io::BufWriter::new(f)),
+            Err(e) => {
+                eprintln!("stream {name}: cannot create {webm_path}: {e}; webm output disabled");
+                None
+            }
+        }
+    };
     let mut decoder =
         opus::Decoder::new(48_000, opus::Channels::Mono).expect("opus decoder");
     let mut pcm: Vec<i16> = Vec::new();
@@ -292,9 +311,15 @@ async fn dump_stream(
     };
     let mut seen: HashSet<u64> = HashSet::new();
     let mut pre_skip = OPUS_PRE_SKIP;
+    // True once the live-play sink's pipe is gone (e.g. `paplay` exited);
+    // stops retrying a dead pipe instead of writing until the deadline.
+    let mut sink_broken = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
 
     loop {
+        if sink_broken {
+            break;
+        }
         let chunk = match tokio::time::timeout_at(deadline, stream.next()).await {
             Ok(Some(Ok(chunk))) => chunk,
             Ok(Some(Err(e))) => {
@@ -308,8 +333,11 @@ async fn dump_stream(
             Err(_) => break, // deadline
         };
         res.total_bytes += chunk.payload.len();
-        if let Some(w) = webm.as_mut() {
-            w.write_all(&chunk.payload).expect("write webm");
+        if let Some(w) = webm.as_mut()
+            && let Err(e) = w.write_all(&chunk.payload)
+        {
+            eprintln!("stream {name}: webm write failed: {e}; stopping capture");
+            break;
         }
         if chunk.init_segment {
             res.n_init += 1;
@@ -359,7 +387,11 @@ async fn dump_stream(
                         for smp in samples {
                             bytes.extend_from_slice(&smp.to_le_bytes());
                         }
-                        g.write_all(&bytes).expect("play sink");
+                        if g.write_all(&bytes).is_err() {
+                            eprintln!("stream {name}: play sink write failed (pipe closed?); stopping");
+                            sink_broken = true;
+                            break; // out of the packet loop
+                        }
                     } else {
                         pcm.extend_from_slice(samples);
                     }
@@ -367,9 +399,15 @@ async fn dump_stream(
                 Err(e) => eprintln!("stream {name}: opus decode error: {e}"),
             }
         }
+        if sink_broken {
+            break;
+        }
         if play {
-            if let Some(s) = &sink {
-                s.lock().unwrap().flush().expect("flush play sink");
+            if let Some(s) = &sink
+                && s.lock().unwrap().flush().is_err()
+            {
+                eprintln!("stream {name}: play sink flush failed (pipe closed?); stopping");
+                break;
             }
             if res.n_media % 25 == 0 {
                 eprintln!("stream {name}: t={}s", res.n_media * 200 / 1000);
@@ -378,11 +416,15 @@ async fn dump_stream(
         let dur = cluster_duration_ms(&chunk.payload).unwrap_or(200);
         res.last_end_ms = Some(tc + dur as i64);
     }
-    if let Some(w) = webm.as_mut() {
-        w.flush().expect("flush webm");
+    if let Some(w) = webm.as_mut()
+        && let Err(e) = w.flush()
+    {
+        eprintln!("stream {name}: flushing the webm file failed: {e}");
     }
-    if let Some(s) = &sink {
-        s.lock().unwrap().flush().expect("flush play sink");
+    if let Some(s) = &sink
+        && s.lock().unwrap().flush().is_err()
+    {
+        eprintln!("stream {name}: final play-sink flush failed");
     }
 
     // WAV: 48 kHz mono s16le.
@@ -397,9 +439,13 @@ async fn dump_stream(
     if play {
         eprintln!("stream {name}: playback done");
     } else {
-        std::fs::write(&wav_path, &wav).expect("write wav");
-        res.wav_bytes = wav.len();
-        eprintln!("stream {name}: wrote {webm_path} and {wav_path}");
+        match std::fs::write(&wav_path, &wav) {
+            Ok(()) => {
+                res.wav_bytes = wav.len();
+                eprintln!("stream {name}: wrote {webm_path} and {wav_path}");
+            }
+            Err(e) => eprintln!("stream {name}: cannot write {wav_path}: {e}"),
+        }
     }
     res
 }

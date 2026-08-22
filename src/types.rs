@@ -11,15 +11,6 @@ use crate::constants::*;
 pub struct Frequency(u32);
 
 impl Frequency {
-    /// Create from the numeric value of the 8-digit raw string.
-    ///
-    /// E.g. `01239750` → stored as `1_239_750`, displayed as `123.9750`
-    #[allow(dead_code)]
-    pub fn from_raw(raw: u32) -> Self {
-        debug_assert!(raw < 100_000_000, "raw frequency must be < 100000000");
-        Self(raw)
-    }
-
     /// Return true if this represents an empty/invalid frequency.
     pub fn is_empty(&self) -> bool {
         self.0 == 0
@@ -224,15 +215,22 @@ impl BankMask {
     /// Parse from an SCG response string (e.g. "SCG,0101010101").
     /// Strips the "SCG," prefix if present.
     /// `0` = enabled (valid), `1` = disabled (locked out).
-    pub fn from_scanner_response(s: &str) -> Self {
-        let mut banks = [true; NUM_BANKS];
+    ///
+    /// Returns `None` unless the mask is exactly 10 `0`/`1` characters:
+    /// a truncated or corrupted response must not silently read as a
+    /// valid mask (a short mask used to default to "all banks enabled",
+    /// the opposite of the lockout state it signals).
+    pub fn from_scanner_response(s: &str) -> Option<Self> {
         let mask = s.trim().strip_prefix("SCG,").unwrap_or(s.trim());
-        if mask.len() >= NUM_BANKS {
-            for (i, c) in mask.chars().take(NUM_BANKS).enumerate() {
-                banks[i] = c == '0';
-            }
+        let bytes = mask.as_bytes();
+        if bytes.len() != NUM_BANKS
+            || !bytes
+                .iter()
+                .all(|b| matches!(b, b'0' | b'1'))
+        {
+            return None;
         }
-        Self(banks)
+        Some(Self(std::array::from_fn(|i| bytes[i] == b'0')))
     }
 
     /// Format as an SCG command string (e.g. "SCG,0101010101").
@@ -285,7 +283,6 @@ impl Default for BankMask {
 
 /// Parsed response from the GLG (scan status) command.
 #[derive(Clone, Debug, Default)]
-#[allow(dead_code)]
 pub struct ScanStatus {
     /// Parsed frequency
     pub frequency: Frequency,
@@ -298,6 +295,8 @@ pub struct ScanStatus {
     /// Bank number (1–10), or `None` if not available.
     pub bank: Option<u32>,
     /// Channel index (1–500), or `None` if not available.
+    /// Only read by tests so far; kept for protocol completeness.
+    #[allow(dead_code)]
     pub channel_index: Option<ChannelIndex>,
     /// Raw scanner response for debugging
     pub raw: String,
@@ -614,7 +613,7 @@ mod tests {
     #[test]
     fn bank_mask_from_scanner_response() {
         // 0=enabled, 1=disabled
-        let mask = BankMask::from_scanner_response("0101010101");
+        let mask = BankMask::from_scanner_response("0101010101").unwrap();
         assert!(mask.is_enabled(1)); // '0'
         assert!(!mask.is_enabled(2)); // '1'
         assert!(mask.is_enabled(3));
@@ -624,13 +623,24 @@ mod tests {
     #[test]
     fn bank_mask_from_scanner_response_with_prefix() {
         // Full scanner response includes "SCG," prefix
-        let mask = BankMask::from_scanner_response("SCG,0101010101");
+        let mask = BankMask::from_scanner_response("SCG,0101010101").unwrap();
         assert!(mask.is_enabled(1)); // '0'
         assert!(!mask.is_enabled(2)); // '1'
         assert!(mask.is_enabled(3));
         assert!(!mask.is_enabled(4));
         assert!(mask.is_enabled(5));
         assert!(!mask.is_enabled(6));
+    }
+
+    #[test]
+    fn bank_mask_from_scanner_response_rejects_malformed_masks() {
+        // Truncated masks must not silently become "all banks enabled".
+        assert!(BankMask::from_scanner_response("SCG,0101").is_none());
+        assert!(BankMask::from_scanner_response("010101010").is_none());
+        assert!(BankMask::from_scanner_response("").is_none());
+        // Too long, or containing a non-binary digit.
+        assert!(BankMask::from_scanner_response("SCG,01010101012").is_none());
+        assert!(BankMask::from_scanner_response("SCG,01X1010101").is_none());
     }
 
     #[test]

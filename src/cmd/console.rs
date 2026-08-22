@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use clap::Args;
 use crossterm::{
+    cursor::Show,
     event::{self, Event, KeyCode, KeyEvent},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -207,14 +208,49 @@ impl App {
     }
 }
 
+/// Restores the terminal when dropped, so an early error (or a panic)
+/// cannot leave the user in raw mode on the alternate screen. The flags
+/// are set as each setup step succeeds; the success path clears them
+/// after running the explicit cleanup, making the drop a no-op.
+struct TerminalGuard {
+    raw_enabled: bool,
+    alt_screen_entered: bool,
+}
+
+impl TerminalGuard {
+    fn new() -> Self {
+        Self {
+            raw_enabled: false,
+            alt_screen_entered: false,
+        }
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if self.raw_enabled {
+            let _ = disable_raw_mode();
+        }
+        if self.alt_screen_entered {
+            let mut stdout = io::stdout();
+            let _ = execute!(stdout, LeaveAlternateScreen);
+            let _ = execute!(stdout, Show);
+            let _ = io::Write::flush(&mut stdout);
+        }
+    }
+}
+
 pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
     let device = crate::detect::resolve_device(args.console_device.as_deref())?;
     let mut client = ScannerClient::new(&device)?;
     let mut app = App::new(&mut client);
 
+    let mut guard = TerminalGuard::new();
     enable_raw_mode()?;
+    guard.raw_enabled = true;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    guard.alt_screen_entered = true;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -282,13 +318,14 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
                 break 'main;
             }
         }
-        // Refresh the cached mode for the next frame (key handlers may have
-        // toggled program mode).
-        app.in_prg_mode = client.mode() == Mode::Program;
     }
 
+    // Explicit cleanup on the success path; if any of these fails (or the
+    // main loop unwinds with a panic), the guard repeats it best-effort.
     disable_raw_mode()?;
+    guard.raw_enabled = false;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    guard.alt_screen_entered = false;
     terminal.show_cursor()?;
 
     Ok(())
@@ -300,9 +337,11 @@ pub fn run(args: &ConsoleArgs) -> Result<(), Box<dyn std::error::Error>> {
 // =============================================================================
 
 fn handle_input(app: &mut App, client: &mut ScannerClient, key: KeyEvent, idx: u32) -> bool {
-    // Clear any previous error so it can be re-set by the current operation.
-    app.error = None;
-
+    // Note: a persistent error (e.g. a failed mode transition in the main
+    // loop) is NOT cleared here — navigation and typing keys must not
+    // erase it. Each arm that performs a scanner operation clears the
+    // error itself before running, so a stale message does not survive a
+    // successful action.
     match &app.input_mode {
         InputMode::Normal => handle_normal(app, client, key, idx),
         InputMode::ConfirmDelete => handle_confirm_delete(app, client, key, idx),
@@ -346,8 +385,11 @@ fn handle_normal(app: &mut App, client: &mut ScannerClient, key: KeyEvent, idx: 
                 active_field: EditField::Frequency,
             });
         }
-        KeyCode::Char('s') if app.selected_tab == 0 && client.start_scan().is_err() => {
-            app.error = Some("Failed to start scan".to_string());
+        KeyCode::Char('s') if app.selected_tab == 0 => {
+            app.error = None;
+            if let Err(e) = client.start_scan() {
+                app.error = Some(format!("Failed to start scan: {e}"));
+            }
         }
         KeyCode::Char('l') if app.selected_tab == 0 => {
             app.level_input.clear();
@@ -357,18 +399,21 @@ fn handle_normal(app: &mut App, client: &mut ScannerClient, key: KeyEvent, idx: 
             app.level_input.clear();
             app.input_mode = InputMode::SetLevel(LevelKind::Volume);
         }
-        KeyCode::Char('h') if app.selected_tab == 0 && client.hold_scan().is_err() => {
-            app.error = Some("Failed to hold scan".to_string());
+        KeyCode::Char('h') if app.selected_tab == 0 => {
+            app.error = None;
+            if let Err(e) = client.hold_scan() {
+                app.error = Some(format!("Failed to hold scan: {e}"));
+            }
         }
         KeyCode::Char(c) if app.selected_tab == 0 && c.is_ascii_digit() => {
             if let Some(digit) = c.to_digit(10) {
                 let bank = if digit == 0 { NUM_BANKS as u32 } else { digit };
                 let mut new_mask = app.banks.clone();
                 new_mask.toggle(bank);
-                if client.set_banks(&new_mask).is_ok() {
-                    app.banks = new_mask;
-                } else {
-                    app.error = Some("Failed to update bank mask".to_string());
+                app.error = None;
+                match client.set_banks(&new_mask) {
+                    Ok(()) => app.banks = new_mask,
+                    Err(e) => app.error = Some(format!("Failed to update bank mask: {e}")),
                 }
             }
         }
@@ -385,6 +430,7 @@ fn handle_confirm_delete(
 ) -> bool {
     match key.code {
         KeyCode::Char('y') => {
+            app.error = None;
             match client.delete_channel(idx) {
                 Ok(()) => {
                     app.channels[idx as usize] = None;
@@ -419,18 +465,23 @@ fn handle_set_level(
             if let Ok(lvl) = app.level_input.parse::<u8>()
                 && lvl <= MAX_LEVEL
             {
-                let ok = match kind {
-                    LevelKind::Squelch => client.set_squelch(lvl).is_ok(),
-                    LevelKind::Volume => client.set_volume(lvl).is_ok(),
+                app.error = None;
+                let result = match kind {
+                    LevelKind::Squelch => client.set_squelch(lvl),
+                    LevelKind::Volume => client.set_volume(lvl),
                 };
-                if ok {
-                    let prefix = kind.response_prefix();
-                    match kind {
-                        LevelKind::Squelch => app.squelch = format!("{},{}", prefix, lvl),
-                        LevelKind::Volume => app.volume = format!("{},{}", prefix, lvl),
+                match result {
+                    Ok(()) => {
+                        let prefix = kind.response_prefix();
+                        match kind {
+                            LevelKind::Squelch => app.squelch = format!("{},{}", prefix, lvl),
+                            LevelKind::Volume => app.volume = format!("{},{}", prefix, lvl),
+                        }
                     }
-                } else {
-                    app.error = Some(format!("Failed to set {} level", kind.title()));
+                    Err(e) => {
+                        app.error =
+                            Some(format!("Failed to set {} level: {e}", kind.title()));
+                    }
                 }
             }
             app.input_mode = InputMode::Normal;
@@ -474,9 +525,17 @@ fn handle_editing(
         },
         KeyCode::Enter => {
             // Validate user input before sending to the scanner.
+            app.error = None;
             if let Some(freq) = Frequency::from_user_input(&edit_state.frequency) {
+                // `idx` is always 1–500 in the normal flow (the edit dialog
+                // is only reachable from a bank tab); guard anyway so a
+                // future change cannot panic the console.
+                let Some(index) = ChannelIndex::new(idx) else {
+                    app.error = Some("Invalid channel index".to_string());
+                    return false;
+                };
                 let channel = Channel {
-                    index: ChannelIndex::new(idx).unwrap(),
+                    index,
                     name: edit_state.name.clone(),
                     frequency: freq,
                     // The edit flow has no modulation field yet; AM is the

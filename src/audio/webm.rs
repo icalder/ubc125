@@ -253,7 +253,6 @@ impl WebmSegmenter {
                         return Ok(false);
                     }
                     // The Void is reserved space; skip it entirely.
-                    // The Void is reserved space; skip it entirely.
                     self.pos += total;
                     Ok(true)
                 }
@@ -440,6 +439,9 @@ fn read_vint_size(bytes: &[u8]) -> Result<Option<(Option<u64>, usize)>, WebmErro
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
+    // Reuse the muxer's canonical id encoding instead of a second copy
+    // (re-exported so the test module's glob import keeps working).
+    pub(crate) use crate::audio::webm_mux::id_bytes;
 
     /// Minimal canonical vint size encoding for `value`.
     ///
@@ -471,13 +473,6 @@ pub(crate) mod fixtures {
 
     pub(crate) fn unknown_size() -> Vec<u8> {
         vec![0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
-    }
-
-    /// Element id as its raw bytes (no leading zero padding).
-    pub(crate) fn id_bytes(id: u32) -> Vec<u8> {
-        let be = id.to_be_bytes();
-        let first = be.iter().position(|&b| b != 0).unwrap();
-        be[first..].to_vec()
     }
 
     /// Build a complete EBML element (id + size + payload).

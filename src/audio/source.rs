@@ -113,6 +113,12 @@ pub trait CaptureSource: Send + Sync {
 }
 
 /// Shared stop state between a [`CaptureHandle`] and its reader task.
+///
+/// `pid` is a plain `std::sync::Mutex` on purpose: the critical section is
+/// a single `u32` store, never held across an `.await`, so a momentary
+/// thread block is harmless and a `tokio` mutex would buy nothing. Lock
+/// poisoning is recovered (`into_inner`) rather than propagated, so a
+/// panicking owner cannot cascade through stop/cleanup.
 pub(crate) struct HandleStop {
     pid: std::sync::Mutex<Option<u32>>,
     pub(crate) cancel: watch::Sender<bool>,
@@ -138,6 +144,8 @@ impl HandleStop {
     /// Mark the reader task finished.
     pub(crate) fn mark_exited(&self) {
         self.exited_flag.store(true, Ordering::SeqCst);
+        // Best effort: a send with no subscribers is a deliberate no-op —
+        // the flag above carries the state, not this channel.
         let _ = self.exited.send(true);
     }
 }
@@ -170,11 +178,22 @@ pub struct StopHandle(Arc<HandleStop>);
 
 impl StopHandle {
     pub async fn stop(&self) {
-        if let Some(pid) = *self.0.pid.lock().unwrap() {
+        // The guard is scoped so it is dropped before the awaits below
+        // (a `std` MutexGuard held across an await would make the future
+        // non-Send).
+        {
+            let pid = self
+                .0
+                .pid
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // SIGKILL: command sources handle no signals in our usage; the
             // kill must release the ALSA device immediately.
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            if let Some(pid) = *pid {
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            }
         }
+        // Best effort: a send with no subscribers is a deliberate no-op.
         let _ = self.0.cancel.send(true);
         if self.0.exited_flag.load(Ordering::SeqCst) {
             return;
@@ -207,12 +226,14 @@ impl CaptureSource for CommandSource {
     fn start(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<CaptureHandle, SourceError>> + Send + '_>> {
-        Box::pin(run_capture(&self.argv, &self.label))
+        // `run_capture` is fully synchronous; the boxed future exists only
+        // for the object-safe trait signature and completes on first poll.
+        Box::pin(async move { run_capture(&self.argv, &self.label) })
     }
 }
 
 /// Spawn and supervise a WebM-producing child process.
-async fn run_capture(argv: &[String], label: &str) -> Result<CaptureHandle, SourceError> {
+fn run_capture(argv: &[String], label: &str) -> Result<CaptureHandle, SourceError> {
     let stop = Arc::new(HandleStop::new());
     let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
@@ -229,11 +250,18 @@ async fn run_capture(argv: &[String], label: &str) -> Result<CaptureHandle, Sour
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(SourceError::Spawn)?;
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
+    // `take()` only fails if this Command is changed to non-piped stdio;
+    // surface that as a source error instead of panicking the broadcaster
+    // task that started us.
+    let stdout = child.stdout.take().ok_or_else(|| {
+        SourceError::Spawn(IoError::other("child stdout was not piped"))
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        SourceError::Spawn(IoError::other("child stderr was not piped"))
+    })?;
     // The task below owns the child (to `wait()` on it); stop() kills it by
     // pid, so it can interrupt the pump phase without owning it.
-    *stop.pid.lock().unwrap() = child.id();
+    *stop.pid.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = child.id();
 
     let label = label.to_string();
     let stderr_tail = Arc::new(Mutex::new(Vec::new()));
@@ -244,7 +272,13 @@ async fn run_capture(argv: &[String], label: &str) -> Result<CaptureHandle, Sour
         let pump_exit = pump_stdout(stdout, &tx, &label).await;
         // Kill before waiting so a wedged child (e.g. blocked on a full
         // pipe) cannot hang the shutdown path. No-op if it already exited.
-        let _ = child.start_kill();
+        if let Err(e) = child.start_kill() {
+            // ESRCH means the child already exited (the expected no-op);
+            // any other failure would leak a running child, so log it.
+            if e.raw_os_error() != Some(libc::ESRCH) {
+                warn!("{label}: failed to kill child: {e}");
+            }
+        }
         let status = child.wait().await;
         stderr_task.await.ok();
         let exit = match status {
@@ -298,7 +332,7 @@ async fn drain_stderr(mut stderr: tokio::process::ChildStderr, ring: Arc<Mutex<V
         match stderr.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let mut ring = ring.lock().unwrap();
+                let mut ring = ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 ring.extend_from_slice(&buf[..n]);
                 if ring.len() > STDERR_TAIL_BYTES {
                     let excess = ring.len() - STDERR_TAIL_BYTES;
@@ -311,7 +345,10 @@ async fn drain_stderr(mut stderr: tokio::process::ChildStderr, ring: Arc<Mutex<V
 
 /// Up to the last five non-empty stderr lines, joined for log messages.
 fn stderr_snapshot(ring: &Arc<Mutex<Vec<u8>>>) -> String {
-    let bytes = ring.lock().unwrap().clone();
+    let bytes = ring
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(5);

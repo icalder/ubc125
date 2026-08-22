@@ -95,18 +95,30 @@ impl ScannerServer {
 ///
 /// Validation failures are the caller's fault (`invalid_argument`);
 /// serial/timeout failures mean the scanner is unreachable
-/// (`unavailable`); anything else is a bug or protocol surprise
-/// (`internal`).
+/// (`unavailable`); the scanner's own negative acks are classified by
+/// their meaning (`ERR` = bad parameters → `invalid_argument`,
+/// `NG` = wrong state/mode for the command → `failed_precondition`);
+/// anything else is a protocol surprise (`internal`).
 impl From<ScannerError> for Status {
     fn from(e: ScannerError) -> Self {
+        // The message is taken before the match so the arms can move `e`'s
+        // fields (e.g. `got`) while keeping the full Display text.
+        let msg = e.to_string();
         match e {
-            ScannerError::InvalidVolume(_) => Self::invalid_argument(e.to_string()),
-            ScannerError::InvalidSquelch(_) => Self::invalid_argument(e.to_string()),
-            ScannerError::InvalidChannelIndex(_) => Self::invalid_argument(e.to_string()),
-            ScannerError::InvalidBank(_) => Self::invalid_argument(e.to_string()),
-            ScannerError::Io(_) => Self::unavailable(e.to_string()),
-            ScannerError::Timeout { .. } => Self::unavailable(e.to_string()),
-            ScannerError::UnexpectedResponse { .. } => Self::internal(e.to_string()),
+            ScannerError::InvalidVolume(_) => Self::invalid_argument(msg),
+            ScannerError::InvalidSquelch(_) => Self::invalid_argument(msg),
+            ScannerError::InvalidChannelIndex(_) => Self::invalid_argument(msg),
+            ScannerError::InvalidBank(_) => Self::invalid_argument(msg),
+            ScannerError::Io(_) => Self::unavailable(msg),
+            ScannerError::Timeout { .. } => Self::unavailable(msg),
+            // `send_action` reports the scanner's nack tokens verbatim in
+            // `got`; map them to the codes that tell the client what to do
+            // (fix the arguments vs. check the scanner's mode).
+            ScannerError::UnexpectedResponse { got, .. } => match got.as_str() {
+                "ERR" => Self::invalid_argument(msg),
+                "NG" => Self::failed_precondition(msg),
+                _ => Self::internal(msg),
+            },
         }
     }
 }
@@ -128,21 +140,15 @@ where
     .map_err(|e| Status::internal(e.to_string()))?
 }
 
-impl ScannerServer {
-    /// Execute a scanner command and return the raw response string.
-    async fn cmd(&self, command: &str) -> Result<String, Status> {
-        let cmd = command.to_string();
-        with_scanner(self.client.clone(), move |client| client.send_command(&cmd)).await
-    }
-}
-
 #[tonic::async_trait]
 impl SystemInfoService for ScannerServer {
     async fn get_model_info(
         &self,
         _request: Request<GetModelInfoRequest>,
     ) -> Result<Response<GetModelInfoResponse>, Status> {
-        let res = self.cmd("MDL").await?;
+        // Typed method: a timeout is an `unavailable` error, not a silent
+        // empty string (the old `cmd()` escape hatch swallowed timeouts).
+        let res = with_scanner(self.client.clone(), |client| client.get_model()).await?;
         Ok(Response::new(GetModelInfoResponse { result: res }))
     }
 
@@ -150,7 +156,10 @@ impl SystemInfoService for ScannerServer {
         &self,
         _request: Request<GetFirmwareVersionRequest>,
     ) -> Result<Response<GetFirmwareVersionResponse>, Status> {
-        let res = self.cmd("VER").await?;
+        // Typed method: see `get_model_info` for why not the raw escape hatch.
+        let res =
+            with_scanner(self.client.clone(), |client| client.get_firmware_version())
+                .await?;
         Ok(Response::new(GetFirmwareVersionResponse { result: res }))
     }
 }
@@ -577,12 +586,28 @@ mod tests {
         assert_eq!(Status::from(e).code(), Code::Internal);
     }
 
+    #[test]
+    fn status_from_scanner_nacks_uses_precise_codes() {
+        // ERR: the scanner rejected the command's parameters.
+        let err = ScannerError::UnexpectedResponse {
+            command: "VOL,99".into(),
+            got: "ERR".into(),
+        };
+        assert_eq!(Status::from(err).code(), Code::InvalidArgument);
+        // NG: the scanner is in the wrong state for the command.
+        let ng = ScannerError::UnexpectedResponse {
+            command: "SCG".into(),
+            got: "NG".into(),
+        };
+        assert_eq!(Status::from(ng).code(), Code::FailedPrecondition);
+    }
+
     // -- response mapping (U7) --
 
     #[test]
     fn status_response_mapping() {
         let status = ScanStatus::parse_glg(GLG_OK).unwrap();
-        let banks = BankMask::from_scanner_response(SCG_ALT);
+        let banks = BankMask::from_scanner_response(SCG_ALT).unwrap();
         let proto = GetStatusResponse::from(StatusUpdate { status, banks });
         assert_eq!(proto.frequency, "123.9750");
         assert_eq!(proto.bank, "2");

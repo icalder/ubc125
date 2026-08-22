@@ -498,7 +498,7 @@ mod tests {
         let update = next_status(&mut rx).await;
         assert_eq!(update.status.frequency.to_string(), "123.9750");
         // The first poll also refreshes the bank mask from the radio.
-        assert_eq!(update.banks, BankMask::from_scanner_response(SCG_ALT));
+        assert_eq!(update.banks, BankMask::from_scanner_response(SCG_ALT).unwrap());
         drop(sub);
         assert!(
             wait_until(|| !broadcaster.is_active()).await,
@@ -604,7 +604,7 @@ mod tests {
             .cached_status()
             .expect("late joiner must be handed the last polled status");
         assert_eq!(update.status.frequency.to_string(), "123.9750");
-        assert_eq!(update.banks, BankMask::from_scanner_response(SCG_ALT));
+        assert_eq!(update.banks, BankMask::from_scanner_response(SCG_ALT).unwrap());
         // Its channel still receives subsequent live values.
         let mut rx_late = late.resubscribe();
         next_status(&mut rx_late).await;
@@ -624,7 +624,7 @@ mod tests {
         let mut rx = sub.resubscribe();
         // The poll-0 refresh carries the radio's mask.
         let first = next_status(&mut rx).await;
-        assert_eq!(first.banks, BankMask::from_scanner_response(SCG_ALT));
+        assert_eq!(first.banks, BankMask::from_scanner_response(SCG_ALT).unwrap());
         // A successful SetEnabledBanks must reach subscribers on the very
         // next poll, long before the slow radio refresh.
         let all_on = BankMask::new();
@@ -652,11 +652,11 @@ mod tests {
         let sub = broadcaster.subscribe().await;
         let mut rx = sub.resubscribe();
         let first = next_status(&mut rx).await;
-        assert_eq!(first.banks, BankMask::from_scanner_response(SCG_ALT));
+        assert_eq!(first.banks, BankMask::from_scanner_response(SCG_ALT).unwrap());
         // The radio now answers with all banks enabled (a button press);
         // the next poll's refresh must pick it up.
         let second = next_status(&mut rx).await;
-        assert_eq!(second.banks, BankMask::from_scanner_response("SCG,0000000000"));
+        assert_eq!(second.banks, BankMask::from_scanner_response("SCG,0000000000").unwrap());
         drop(sub);
         assert!(wait_until(|| !broadcaster.is_active()).await);
     }

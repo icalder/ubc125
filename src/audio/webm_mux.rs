@@ -215,7 +215,12 @@ impl WebmMuxer {
 }
 
 /// Element id as its raw bytes (no leading zero padding).
-fn id_bytes(id: u32) -> Vec<u8> {
+///
+/// EBML element ids are never zero, so the first non-zero byte always
+/// exists; the debug assert turns a future zero-id bug into a clear
+/// message instead of an opaque panic.
+pub(crate) fn id_bytes(id: u32) -> Vec<u8> {
+    debug_assert!(id != 0, "EBML element id must be non-zero");
     let be = id.to_be_bytes();
     let first = be.iter().position(|&b| b != 0).unwrap();
     be[first..].to_vec()
@@ -252,10 +257,7 @@ fn unknown_size() -> [u8; 8] {
 
 /// A complete EBML element: id + size vint + `payload`.
 fn element(id: u32, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let be = id.to_be_bytes();
-    let first = be.iter().position(|&b| b != 0).unwrap();
-    out.extend_from_slice(&be[first..]);
+    let mut out = id_bytes(id);
     out.extend_from_slice(&vint_size(payload.len() as u64));
     out.extend_from_slice(payload);
     out

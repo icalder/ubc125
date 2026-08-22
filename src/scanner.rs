@@ -82,7 +82,11 @@ impl ScannerClient {
         let port = serialport::new(device_path, 115_200)
             .timeout(Duration::from_millis(PORT_TIMEOUT_MS))
             .open()?;
-        let _ = port.clear(serialport::ClearBuffer::All);
+        // A failed clear is not fatal (the port may not support it), but
+        // stale bytes could corrupt the first exchange, so log it.
+        if let Err(e) = port.clear(serialport::ClearBuffer::All) {
+            tracing::warn!("failed to clear serial buffers on startup: {e}");
+        }
         Ok(Self::with_transport(Box::new(SerialTransport { port })))
     }
 
@@ -195,7 +199,8 @@ impl ScannerClient {
     /// Validate that `response` looks like a reply to `cmd` (same command
     /// prefix, ignoring parameters).
     fn check_reply(cmd: &str, response: &str) -> Result<(), ScannerError> {
-        let prefix = cmd.split(',').next().unwrap_or(cmd);
+        // `split` always yields at least one item ("" for an empty cmd).
+        let prefix = cmd.split(',').next().unwrap();
         if response.starts_with(prefix) {
             Ok(())
         } else {
@@ -305,7 +310,12 @@ impl ScannerClient {
         self.with_program_mode(|client| {
             let response = client.exchange("SCG")?;
             Self::check_reply("SCG", &response)?;
-            Ok(BankMask::from_scanner_response(&response))
+            BankMask::from_scanner_response(&response).ok_or_else(|| {
+                ScannerError::UnexpectedResponse {
+                    command: "SCG".to_string(),
+                    got: response,
+                }
+            })
         })
     }
 
@@ -593,7 +603,7 @@ mod tests {
 
     #[test]
     fn set_banks_program_mode_sequence() {
-        let mask = BankMask::from_scanner_response("SCG,0101010101");
+        let mask = BankMask::from_scanner_response("SCG,0101010101").unwrap();
         let (mut client, written) = mock_client(&["PRG", "SCG,0101010101", "EPG", "KEY"]);
         client.set_banks(&mask).unwrap();
         assert_eq!(
@@ -604,7 +614,7 @@ mod tests {
 
     #[test]
     fn set_banks_failure_still_returns_to_monitor() {
-        let mask = BankMask::from_scanner_response("SCG,0101010101");
+        let mask = BankMask::from_scanner_response("SCG,0101010101").unwrap();
         // SCG command is rejected with NG.
         let (mut client, written) = mock_client(&["PRG", "NG", "EPG", "KEY"]);
         let err = client.set_banks(&mask).unwrap_err();

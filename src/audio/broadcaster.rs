@@ -377,9 +377,11 @@ async fn run_generation(
         }
     }
     let _ = sender.send(AudioEvent::Failed);
-    if let Some(exit) = exit {
-        end_generation(&inner, gen_id, exit).await;
-    }
+    // Always clear the generation: if the source task panicked without
+    // sending an `End` event, `exit` is still `None`, and skipping this
+    // would leave a dead generation that a rejoiner latches onto (its pump
+    // is gone, so the client would reconnect in a loop).
+    end_generation(&inner, gen_id, exit.unwrap_or(GenerationExit::Failed)).await;
     // Drop the sender so any remaining receivers see a closed channel.
 }
 
@@ -401,16 +403,17 @@ fn classify_end(inner: &Inner, gen_id: u64, source_exit: SourceExit) -> Generati
         _ => return GenerationExit::Unavailable,
     };
     if stopping || source_exit.is_clean() {
-        GenerationExit::Unavailable
-    } else {
-        // Neither stopping nor clean: a genuine source failure.
-        let reason = match &source_exit {
-            SourceExit::Failed(r) => r.as_str(),
-            SourceExit::Clean => unreachable!("clean exit handled above"),
-        };
-        warn!(%reason, "audio capture failed");
-        GenerationExit::Failed
+        return GenerationExit::Unavailable;
     }
+    // Neither stopping nor clean: a genuine source failure.
+    let SourceExit::Failed(reason) = source_exit else {
+        // Logically unreachable (clean exits are handled above); degrade to
+        // the semantically correct status instead of panicking the audio
+        // pump task.
+        return GenerationExit::Unavailable;
+    };
+    warn!(%reason, "audio capture failed");
+    GenerationExit::Failed
 }
 
 /// Kill (if needed) and clear a finished generation. Id-gated: if a newer
