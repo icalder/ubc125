@@ -127,6 +127,12 @@
               default = "";
               description = "ALSA capture device for the audio pipeline. An empty string uses the built-in default (the Pi's USB mic, card 2).";
             };
+
+            declick = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Enable the experimental squelch de-clicker on the audio pipeline (a 1000 ms floor-anchored close fade and a 20 ms onset fade).";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -144,7 +150,8 @@
                 SupplementaryGroups = [ "dialout" "audio" ];
                 ExecStart = "${cfg.package}/bin/ubc125 serve --server-addr ${cfg.listenAddress}"
                   + lib.optionalString (cfg.device != "") " --device ${cfg.device}"
-                  + lib.optionalString (cfg.audioDevice != "") " --audio-device ${cfg.audioDevice}";
+                  + lib.optionalString (cfg.audioDevice != "") " --audio-device ${cfg.audioDevice}"
+                  + lib.optionalString cfg.declick " --declick";
                 # If the scanner is not (yet) connected, serve exits with an
                 # error and systemd retries every 10 s until it appears.
                 Restart = "on-failure";

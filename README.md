@@ -31,6 +31,7 @@ services.ubc125 = {
   # listenAddress = "0.0.0.0:50051";  # default
   # device = "/dev/ttyACM0";          # default: auto-detect by USB id
   # audioDevice = "hw:2";             # default: the Pi's USB mic
+  # declick = true;                   # default: false, experimental audio de-clicker
 };
 ```
 
@@ -46,6 +47,7 @@ Notes:
 - The service runs as a dynamic user with the `dialout` (ttyACM* access) and `audio` (ALSA mic capture) groups.
 - If the scanner is not connected at boot, `serve` fails and systemd retries every 10 s until it appears.
 - The web UI and gRPC/gRPC-Web listen on the same port (`0.0.0.0:50051` by default), so it is reachable from other machines on the LAN.
+- `declick = true` enables the experimental squelch de-clicker on the audio pipeline (a 1000 ms floor-anchored close fade and a 20 ms onset fade) — the same as the `serve --declick` flag / `UBC125_DECLICK` env var. It is off by default and only affects the native ALSA audio capture, not the `--audio-cmd` test hook.
 
 For console mode (the Ratatui TUI) you still need a real TTY: `ssh -t itcalde@alarmpi .../ubc125 console` or a physical terminal.
 
