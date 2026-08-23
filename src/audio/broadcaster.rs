@@ -94,6 +94,9 @@ struct Active {
     stop: StopHandle,
     subscribers: usize,
     stopping: bool,
+    /// The source has ended and the generation must not accept new
+    /// subscribers while its stop is being awaited.
+    finished: bool,
 }
 
 struct State {
@@ -166,15 +169,37 @@ impl AudioBroadcaster {
         {
             let mut state = self.inner.state();
             if let Some(active) = &mut state.generation {
-                active.subscribers += 1;
-                active.stopping = false;
-                debug!(gen_id = active.id, "audio subscriber joined running generation");
-                return Ok(AudioSubscription {
-                    sender: active.sender.clone(),
-                    cached_init: active.cached_init.clone(),
-                    inner: Arc::clone(&self.inner),
-                    gen_id: active.id,
-                });
+                if !active.finished {
+                    active.subscribers += 1;
+                    active.stopping = false;
+                    debug!(gen_id = active.id, "audio subscriber joined running generation");
+                    return Ok(AudioSubscription {
+                        sender: active.sender.clone(),
+                        cached_init: active.cached_init.clone(),
+                        inner: Arc::clone(&self.inner),
+                        gen_id: active.id,
+                    });
+                }
+            }
+        }
+
+        // A source can finish before its pump has completed cleanup. Do not
+        // join that dead generation: wait for its stop handle so resources
+        // (in particular the ALSA device) are released, then start fresh.
+        let finished = {
+            let state = self.inner.state();
+            state
+                .generation
+                .as_ref()
+                .filter(|active| active.finished)
+                .map(|active| (active.id, active.stop.clone()))
+        };
+        if let Some((gen_id, stop)) = finished {
+            stop.stop().await;
+            let mut state = self.inner.state();
+            if state.generation.as_ref().is_some_and(|active| active.id == gen_id) {
+                state.generation = None;
+                set_status_locked(&mut state, Status::Unavailable);
             }
         }
         self.start_generation().await
@@ -246,6 +271,7 @@ impl AudioBroadcaster {
                 stop,
                 subscribers: 1,
                 stopping: false,
+                finished: false,
             });
         }
         info!(gen_id = id, "audio capture started");
@@ -376,6 +402,10 @@ async fn run_generation(
             }
         }
     }
+    // Publish the terminal state before sending Failed. A subscriber can
+    // receive Failed and immediately subscribe again; it must not attach to
+    // this generation while cleanup is still in progress.
+    mark_finished(&inner, gen_id);
     let _ = sender.send(AudioEvent::Failed);
     // Always clear the generation: if the source task panicked without
     // sending an `End` event, `exit` is still `None`, and skipping this
@@ -487,6 +517,14 @@ fn cache_init(inner: &Inner, gen_id: u64, bytes: Vec<u8>) {
     let mut state = inner.state();
     if let Some(active) = state.generation.as_mut().filter(|a| a.id == gen_id) {
         active.cached_init = Some(bytes);
+    }
+}
+
+/// Mark a generation terminal before its pump awaits source cleanup.
+fn mark_finished(inner: &Inner, gen_id: u64) {
+    let mut state = inner.state();
+    if let Some(active) = state.generation.as_mut().filter(|a| a.id == gen_id) {
+        active.finished = true;
     }
 }
 
