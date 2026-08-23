@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::audio::{
-    AlsaOpusSource, AudioBroadcaster, CaptureSource, CommandSource, DEFAULT_AUDIO_DEVICE,
+    AlsaOpusSource, AudioBroadcaster, CaptureSource, CommandSource, SquelchGate,
+    SquelchGateConfig, DEFAULT_AUDIO_DEVICE,
 };
 use crate::scanner::ScannerClient;
 use crate::server;
@@ -36,6 +37,11 @@ pub struct ServeArgs {
     /// the native capture; its stdout is the WebM byte stream.
     #[arg(long, env = "UBC125_AUDIO_CMD", hide = true)]
     pub audio_cmd: Option<String>,
+    /// Enable the experimental squelch de-clicker. This uses the current
+    /// interim 1000 ms floor-anchored close fade and a 20 ms onset fade.
+    /// The test audio-command hook is already WebM and is not filtered.
+    #[arg(long, env = "UBC125_DECLICK", default_value_t = false)]
+    pub declick: bool,
 }
 
 /// Pick the capture source: the test hook command if given, else the
@@ -47,7 +53,22 @@ fn audio_source(args: &ServeArgs) -> Arc<dyn CaptureSource> {
             "-c".to_string(),
             cmd.clone(),
         ])),
-        None => Arc::new(AlsaOpusSource::new(&args.audio_device)),
+        None => {
+            let filter = if args.declick {
+                let config = SquelchGateConfig {
+                    fade_out_ms: 1_000,
+                    ..SquelchGateConfig::default()
+                };
+                Some(Arc::new(SquelchGate::new(config)))
+            } else {
+                None
+            };
+            let source = AlsaOpusSource::new(&args.audio_device);
+            match filter {
+                Some(filter) => Arc::new(source.with_filter(filter)),
+                None => Arc::new(source),
+            }
+        }
     }
 }
 

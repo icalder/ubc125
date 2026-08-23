@@ -36,6 +36,8 @@ Code for the serve mode is in [serve.rs](./src/cmd/serve.rs).  The gRPC handler 
 
 Audio: `AudioService/Listen` streams the scanner's audio as WebM/Opus chunks (first chunk is the WebM header/init segment, then cluster-sized media chunks). The capture (ALSA mic via the native `alsa`+`opus` pipeline, or `UBC125_AUDIO_CMD` for tests; the hidden `ubc125 audio-tone` subcommand is the ffmpeg-free test fixture) starts lazily on the first `Listen` and is keyed to that client's id; `AudioService/StopCapture` stops it for that id (a browser fetch abort does not close the TCP connection, so without it the capture would keep holding the audio device). Rust audio code in [src/audio/](./src/audio/mod.rs).
 
+De-clicker tuning target: raw ALSA PCM captured on the Pi over an SSH pipe (`ssh alarmpi 'arecord -D hw:2 -f S16_LE -r 48000 -c 1 -t raw -d 60' > raw.s16`, wrapped to WAV in [test-audio/](./test-audio/README.md)) — **not** the Opus-decoded `Listen` stream: the filter runs before Opus encoding, so tuning must validate against the signal it actually sees.
+
 The server enables `accept_http1`, a permissive CORS layer, and per-service `GrpcWebLayer`s, so browsers can talk to it directly over grpc-web.  On the same port it also serves the web UI: everything that is not a gRPC path falls through to an axum static router over `web/dist` (embedded at compile time with `rust-embed`; see [web.rs](./src/web.rs)).  `GrpcWebLayer` is applied per service (not as a global fallback) because it 400s all non-grpc-web HTTP/1.1.
 
 ### Web UI
