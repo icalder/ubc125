@@ -626,7 +626,7 @@ mod tests {
     /// starts a fresh generation.
     #[tokio::test]
     async fn tone_source_through_broadcaster() {
-        use crate::audio::broadcaster::{AudioBroadcaster, AudioEvent};
+        use crate::audio::broadcaster::{AudioBroadcaster, AudioEvent, Status};
         // 600 ms of tone = 30 frames = exactly 3 clusters.
         let source = Arc::new(ToneSource::new(
             440.0,
@@ -641,7 +641,7 @@ mod tests {
         let deadline = std::time::Instant::now() + WAIT;
         loop {
             assert!(std::time::Instant::now() < deadline, "timed out");
-            match timeout(Duration::from_secs(2), rx.recv())
+            match timeout(WAIT, rx.recv())
                 .await
                 .expect("event timed out")
             {
@@ -659,6 +659,19 @@ mod tests {
         assert!(got_init, "init must arrive first");
         assert_eq!(clusters, 3, "600 ms of audio is exactly 3 clusters");
         drop(sub);
+        // Wait for the first generation to fully end before resubscribing.
+        // Otherwise the resubscribe can race the pump's termination cleanup
+        // (source done, not yet marked finished) and join the dying
+        // generation: its channel then delivers no further events and never
+        // closes (the subscription keeps the sender alive).
+        let end_deadline = std::time::Instant::now() + WAIT;
+        while broadcaster.status() != Status::Unavailable {
+            assert!(
+                std::time::Instant::now() < end_deadline,
+                "first generation did not end"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         // The generation ended (finite source): a new subscriber starts
         // fresh with a new init.
         let sub2 = broadcaster.subscribe().await.expect("resubscribe");
@@ -667,7 +680,7 @@ mod tests {
         let deadline = std::time::Instant::now() + WAIT;
         while !fresh_init {
             assert!(std::time::Instant::now() < deadline, "timed out");
-            match timeout(Duration::from_secs(2), rx2.recv())
+            match timeout(WAIT, rx2.recv())
                 .await
                 .expect("event timed out")
             {
