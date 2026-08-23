@@ -4,11 +4,11 @@ import { createClients, stripPrefix, errorMessage } from "./lib/client.js";
 import { el } from "./components/box.js";
 import { fromUserInput, toDisplay } from "./lib/freq.js";
 import { INITIAL_BACKOFF, MAX_BACKOFF, nextBackoff } from "./lib/backoff.js";
-import { renderTabs, NUM_TABS } from "./components/tabbar.js";
-import { renderHelp } from "./components/helpbar.js";
-import { renderMonitor } from "./views/monitor.js";
+import { createTabs, NUM_TABS } from "./components/tabbar.js";
+import { createHelp } from "./components/helpbar.js";
+import { createMonitor } from "./views/monitor.js";
 import { AudioStream } from "./lib/audio.js";
-import { renderBank, CHANNELS_PER_BANK, bankRange } from "./views/bank.js";
+import { createBank, CHANNELS_PER_BANK, bankRange } from "./views/bank.js";
 import { openEditModal, openConfirmDelete as showConfirmDelete } from "./components/modal.js";
 
 const MAX_CHANNELS = 500;
@@ -33,6 +33,7 @@ const state = {
   bankLoaded: new Set(), // banks whose channel list has been fetched
   cursor: 1, // selected channel index (1-500)
   loadingBank: 0, // bank currently being fetched (0 = none)
+  channelRev: 0, // bumped whenever state.channels contents change
   connected: false,
   audio: "off", // AudioStream state (off|connecting|playing|reconnecting|unavailable)
   audioSupported: typeof MediaSource !== "undefined" &&
@@ -67,6 +68,18 @@ const helpRoot = document.createElement("section");
 const modalRoot = document.createElement("div");
 appRoot.append(bannerRoot, tabRoot, viewRoot, helpRoot, modalRoot);
 
+// The tab bar and help bar are built once and updated in place; the active
+// view is built on tab switches and updated in place on every status tick.
+// The previous design re-created every button, chip, and table row on each
+// 250 ms tick, so a pointer press that straddled a tick landed its mouseup
+// on a replacement node and lost its click (Firefox drops such clicks
+// outright — which is why keys, which have no mousedown/mouseup pair,
+// always felt instant while the buttons felt slow).
+const tabs = createTabs(tabRoot, setTab);
+const help = createHelp(helpRoot);
+let viewApi = null; // { tab, update } — the view currently mounted in viewRoot
+let bannerConnected = null;
+
 function flash(text) {
   state.flash = text;
   clearTimeout(flashTimer);
@@ -88,42 +101,53 @@ function statusLine() {
 }
 
 function render() {
-  if (state.connected) {
-    bannerRoot.replaceChildren();
-  } else {
+  if (state.connected !== bannerConnected) {
+    bannerConnected = state.connected;
     bannerRoot.replaceChildren(
-      el("div", { class: "offline-banner", text: "OFFLINE — waiting for scanner..." }),
+      state.connected ? [] : el("div", { class: "offline-banner", text: "OFFLINE — waiting for scanner..." }),
     );
   }
-  renderTabs(tabRoot, state.tab, setTab);
+  tabs.update(state.tab);
+  if (!viewApi || viewApi.tab !== state.tab) viewApi = mountView(state.tab);
   if (state.tab === 0) {
-    renderMonitor(viewRoot, {
+    viewApi.update({
       info: state.info,
       status: state.status,
       banks: state.banks,
       audio: { state: state.audio, supported: state.audioSupported },
-      onScan: () => runScanAction(scanner.startScan({}), "Scan started"),
-      onHold: () => runScanAction(scanner.holdScan({}), "Scan held"),
-      onToggleBank: (bank) => toggleBank(bank),
-      onAudioPlay: () => audioStream.play(),
-      onAudioStop: () => audioStream.stop(),
     });
   } else {
     const [start] = bankRange(state.tab);
-    renderBank(viewRoot, {
-      bank: state.tab,
-      channels: state.channels.slice(start, start + CHANNELS_PER_BANK),
+    viewApi.update({
+      channels: state.channels,
       cursor: state.cursor - start, // 0-based within the bank
       loading: state.loadingBank === state.tab,
-      onSelect: (i) => {
-        state.cursor = (state.tab - 1) * CHANNELS_PER_BANK + 1 + i;
-        render();
-      },
-      onEdit: openEdit,
-      onDelete: openDeleteModal,
+      rev: state.channelRev,
     });
   }
-  renderHelp(helpRoot, state.tab, statusLine());
+  help.update(state.tab, statusLine());
+}
+
+/** Build the view for `tab` into viewRoot; returns { tab, update }. */
+function mountView(tab) {
+  const api = tab === 0
+    ? createMonitor(viewRoot, {
+        onScan: () => runScanAction(scanner.startScan({}), "Scan started"),
+        onHold: () => runScanAction(scanner.holdScan({}), "Scan held"),
+        onToggleBank: (bank) => toggleBank(bank),
+        onAudioPlay: () => audioStream.play(),
+        onAudioStop: () => audioStream.stop(),
+      })
+    : createBank(viewRoot, tab, {
+        onSelect: (i) => {
+          state.cursor = (tab - 1) * CHANNELS_PER_BANK + 1 + i;
+          render();
+        },
+        onEdit: openEdit,
+        onDelete: openDeleteModal,
+      });
+  api.tab = tab;
+  return api;
 }
 
 // -- gRPC ------------------------------------------------------------------
@@ -191,6 +215,7 @@ function clearBankRange(bank) {
   const [start, end] = bankRange(bank);
   for (let i = start; i <= end; i++) state.channels[i] = null;
   state.bankLoaded.delete(bank);
+  state.channelRev++;
 }
 
 async function loadBank(bank) {
@@ -210,6 +235,7 @@ async function loadBank(bank) {
       };
     }
     state.bankLoaded.add(bank);
+    state.channelRev++;
   } catch (err) {
     state.error = `Failed to load bank ${bank}: ${errorMessage(err)}`;
   } finally {

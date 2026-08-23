@@ -126,18 +126,21 @@ Commit the updated `dist/proto/` (and `lib/grpc/rust-gen/src/proto/`).
 ## Conventions
 
 - Vanilla ES modules, no framework, no TypeScript. JSDoc on non-obvious
-  functions. One `state` object in `app.js`; views are pure render
-  functions; keys and pointer events funnel into the same action
-  functions.
+  functions. One `state` object in `app.js`; views are create-once +
+  update-in-place modules (`createMonitor`/`createBank` build their DOM
+  once per tab switch, then only write changed text/classes — never
+  replacing nodes on the 250 ms status tick, so a pointer press can
+  never straddle a node replacement and lose its click); keys and
+  pointer events funnel into the same action functions.
 - protobuf-es v2 plain objects are **camelCase** (`signalDetected`,
   `channelName`); the server sends display-format frequencies — normalize
   with `fromUserInput()` on receipt, send raw 8-digit strings.
 - `stripPrefix()` removes the scanner's `CMD,` echo from raw responses
   (`MDL,UBC125XLT` → `UBC125XLT`).
-- The stack script runs the prebuilt **debug** binary, but rust-embed (no
-  `debug_mode` feature) embeds `dist/` at compile time in debug **and**
-  release builds — so any web change needs `cargo build` + a stack
-  restart, same as a Rust change.
+- The stack script runs the prebuilt **debug** binary. rust-embed (no
+  `debug-embed` feature) reads `dist/` from disk at runtime in debug
+  builds, so web changes need only a browser reload — but release builds
+  embed `dist/` at compile time and need `cargo build`.
 - Focus events are suppressed while the browser window is unfocused, so
   modal field highlighting is driven explicitly (`setActive`), not by
   focus/blur alone.

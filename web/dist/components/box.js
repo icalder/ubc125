@@ -34,3 +34,18 @@ export function box(title, opts = {}, ...children) {
 export function replace(container, ...children) {
   container.replaceChildren(...children);
 }
+
+/** Set textContent only when the value changed (avoids per-tick layout churn). */
+export function setText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
+
+/** Set className only when the value changed. */
+export function setClass(node, className) {
+  if (node.className !== className) node.className = className;
+}
+
+/** Set the disabled flag only when the value changed. */
+export function setDisabled(node, disabled) {
+  if (node.disabled !== disabled) node.disabled = disabled;
+}
