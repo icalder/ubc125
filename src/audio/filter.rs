@@ -18,6 +18,15 @@ pub trait PcmFrameFilter: Send + Sync {
     /// length is unchanged.
     fn process_frame(&mut self, frame: &mut [i16]);
 
+    /// Return frames held by a stateful filter at the end of a capture.
+    ///
+    /// The default is correct for filters without latency. A filter that
+    /// delays input must override this method, otherwise its final buffered
+    /// samples would be lost when a finite capture ends.
+    fn flush(&mut self) -> Vec<Vec<i16>> {
+        Vec::new()
+    }
+
     /// A fresh-state instance for a new capture generation.
     fn for_capture(&self) -> Box<dyn PcmFrameFilter>;
 }

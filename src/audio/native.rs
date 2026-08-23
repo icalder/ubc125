@@ -271,6 +271,22 @@ fn run_reader_capture<R: PcmReader>(
             Err(e) => break SourceExit::Failed(e.to_string()),
         }
     };
+    if let Some(f) = filter.as_mut() {
+        for frame in f.flush() {
+            let Ok(closed) = pipeline.add_frame(&frame) else {
+                let _ = reader.close();
+                finish(&tx, &stop, SourceExit::Failed("encode failed".into()));
+                return;
+            };
+            for cluster in closed {
+                if !send_bytes(&tx, cluster) {
+                    let _ = reader.close();
+                    stop.mark_exited();
+                    return;
+                }
+            }
+        }
+    }
     if let Some(cluster) = pipeline.flush() {
         send_bytes(&tx, cluster);
     }
@@ -333,6 +349,20 @@ fn run_tone_capture(
             }
         }
     };
+    if let Some(f) = filter.as_mut() {
+        for frame in f.flush() {
+            let Ok(closed) = pipeline.add_frame(&frame) else {
+                finish(&tx, &stop, SourceExit::Failed("encode failed".into()));
+                return;
+            };
+            for cluster in closed {
+                if !send_bytes(&tx, cluster) {
+                    stop.mark_exited();
+                    return;
+                }
+            }
+        }
+    }
     if let Some(cluster) = pipeline.flush() {
         send_bytes(&tx, cluster);
     }
