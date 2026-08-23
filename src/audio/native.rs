@@ -11,12 +11,14 @@
 //! (no ALSA); it is the `audio-tone` subcommand's engine and the
 //! hardware-free test source.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 use tracing::warn;
 
 use crate::audio::alsacapture::{AlsaReader, FrameSplitter, PcmEvent, PcmReader, PERIOD_FRAMES};
+use crate::audio::filter::PcmFrameFilter;
 use crate::audio::opusenc::{OpusFrameEncoder, FRAME_SAMPLES};
 use crate::audio::source::{
     CaptureHandle, CaptureSource, HandleStop, SourceError, SourceEvent, SourceExit,
@@ -66,10 +68,21 @@ impl WebmOpusPipeline {
     }
 }
 
-/// Production capture source: ALSA device → Opus → WebM, no child process.
-#[derive(Debug, Clone)]
+/// Production capture source: ALSA device → PCM filter (optional) →
+/// Opus → WebM, no child process.
+#[derive(Clone)]
 pub struct AlsaOpusSource {
     device: String,
+    filter: Option<Arc<dyn PcmFrameFilter>>,
+}
+
+impl std::fmt::Debug for AlsaOpusSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AlsaOpusSource")
+            .field("device", &self.device)
+            .field("filter", &self.filter.as_ref().map(|_| "present"))
+            .finish()
+    }
 }
 
 impl AlsaOpusSource {
@@ -77,7 +90,16 @@ impl AlsaOpusSource {
     pub fn new(device: impl Into<String>) -> Self {
         Self {
             device: device.into(),
+            filter: None,
         }
+    }
+
+    /// Set the real-time PCM filter applied to every captured frame
+    /// before Opus encoding. A fresh filter state is created per capture
+    /// generation ([`PcmFrameFilter::for_capture`]).
+    pub fn with_filter(mut self, filter: Arc<dyn PcmFrameFilter>) -> Self {
+        self.filter = Some(filter);
+        self
     }
 }
 
@@ -100,21 +122,25 @@ impl CaptureSource for AlsaOpusSource {
             // task's first poll still delivers.
             let cancel = stop.cancel.subscribe();
             let task_stop = std::sync::Arc::clone(&stop);
+            let filter = self.filter.as_ref().map(|f| f.for_capture());
             tokio::task::spawn_blocking(move || {
-                run_reader_capture(reader, tx, task_stop, cancel);
+                run_reader_capture(reader, tx, task_stop, cancel, filter);
             });
             Ok(CaptureHandle { rx, stop })
         })
     }
 }
 
-/// Deterministic tone source: the native pipeline over a sine, no ALSA.
-/// Emits `duration` of audio as fast as possible, then ends cleanly.
-#[derive(Debug, Clone)]
+/// Deterministic tone source: the native pipeline (including the optional
+/// PCM filter) over a sine, no ALSA — the offline-simulation test
+/// pattern. Emits `duration` of audio as fast as possible, then ends
+/// cleanly.
+#[derive(Clone)]
 pub struct ToneSource {
     freq: f64,
     duration: Duration,
     bitrate: u32,
+    filter: Option<Arc<dyn PcmFrameFilter>>,
 }
 
 impl ToneSource {
@@ -123,7 +149,25 @@ impl ToneSource {
             freq,
             duration,
             bitrate: bitrate_bps,
+            filter: None,
         }
+    }
+
+    /// Set the real-time PCM filter (see [`AlsaOpusSource::with_filter`]).
+    pub fn with_filter(mut self, filter: Arc<dyn PcmFrameFilter>) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+}
+
+impl std::fmt::Debug for ToneSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToneSource")
+            .field("freq", &self.freq)
+            .field("duration", &self.duration)
+            .field("bitrate", &self.bitrate)
+            .field("filter", &self.filter.as_ref().map(|_| "present"))
+            .finish()
     }
 }
 
@@ -145,8 +189,9 @@ impl CaptureSource for ToneSource {
             let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
             let cancel = stop.cancel.subscribe();
             let task_stop = std::sync::Arc::clone(&stop);
+            let filter = self.filter.as_ref().map(|f| f.for_capture());
             tokio::task::spawn_blocking(move || {
-                run_tone_capture(tx, task_stop, cancel, freq, duration, bitrate);
+                run_tone_capture(tx, task_stop, cancel, freq, duration, bitrate, filter);
             });
             Ok(CaptureHandle { rx, stop })
         })
@@ -164,12 +209,15 @@ fn finish(tx: &mpsc::Sender<SourceEvent>, stop: &HandleStop, exit: SourceExit) {
     stop.mark_exited();
 }
 
-/// The blocking capture loop: ALSA reads → splitter → Opus → WebM → events.
+/// The blocking capture loop: ALSA reads → splitter → PCM filter (the
+/// optional [`PcmFrameFilter`], applied to every 960-sample frame before
+/// Opus encoding) → WebM → events.
 fn run_reader_capture<R: PcmReader>(
     mut reader: R,
     tx: mpsc::Sender<SourceEvent>,
     stop: std::sync::Arc<HandleStop>,
     mut cancel: watch::Receiver<bool>,
+    mut filter: Option<Box<dyn PcmFrameFilter>>,
 ) {
     let mut pipeline = match WebmOpusPipeline::new(DEFAULT_BITRATE_BPS) {
         Ok(p) => p,
@@ -192,7 +240,10 @@ fn run_reader_capture<R: PcmReader>(
         }
         match reader.read(&mut buf) {
             Ok(PcmEvent::Frames(n)) => {
-                for frame in splitter.feed(&buf[..n]) {
+                for mut frame in splitter.feed(&buf[..n]) {
+                    if let Some(f) = filter.as_mut() {
+                        f.process_frame(&mut frame);
+                    }
                     let Ok(closed) = pipeline.add_frame(&frame) else {
                         let _ = reader.close();
                         finish(&tx, &stop, SourceExit::Failed("encode failed".into()));
@@ -236,6 +287,7 @@ fn run_tone_capture(
     freq: f64,
     duration: Duration,
     bitrate_bps: u32,
+    mut filter: Option<Box<dyn PcmFrameFilter>>,
 ) {
     let mut pipeline = match WebmOpusPipeline::new(bitrate_bps) {
         Ok(p) => p,
@@ -258,7 +310,7 @@ fn run_tone_capture(
         if sample_index >= total_samples {
             break SourceExit::Clean;
         }
-        let frame: Vec<i16> = (0..FRAME_SAMPLES)
+        let mut frame: Vec<i16> = (0..FRAME_SAMPLES)
             .map(|i| {
                 let t = (sample_index + i as u64) as f64 / 48_000.0;
                 (TONE_AMPLITUDE * (2.0 * std::f64::consts::PI * freq * t).sin())
@@ -267,6 +319,9 @@ fn run_tone_capture(
             .map(|s| s.round() as i16)
             .collect();
         sample_index += FRAME_SAMPLES as u64;
+        if let Some(f) = filter.as_mut() {
+            f.process_frame(&mut frame);
+        }
         let Ok(closed) = pipeline.add_frame(&frame) else {
             finish(&tx, &stop, SourceExit::Failed("encode failed".into()));
             return;
@@ -300,6 +355,9 @@ mod tests {
     struct LoopingFakeReader {
         /// frames per read; `None` means fatal on the first read.
         frames: Option<usize>,
+        /// End with a scripted fatal after this many reads
+        /// (`None` = loop forever).
+        max_reads: Option<usize>,
         reads: Arc<AtomicUsize>,
         close_count: Arc<AtomicUsize>,
     }
@@ -308,6 +366,17 @@ mod tests {
         fn new(frames: usize) -> Self {
             Self {
                 frames: Some(frames),
+                max_reads: None,
+                reads: Arc::new(AtomicUsize::new(0)),
+                close_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// Deterministic finite reader: exactly `max` reads, then fatal.
+        fn finite(frames: usize, max: usize) -> Self {
+            Self {
+                frames: Some(frames),
+                max_reads: Some(max),
                 reads: Arc::new(AtomicUsize::new(0)),
                 close_count: Arc::new(AtomicUsize::new(0)),
             }
@@ -316,6 +385,7 @@ mod tests {
         fn fatal() -> Self {
             Self {
                 frames: None,
+                max_reads: None,
                 reads: Arc::new(AtomicUsize::new(0)),
                 close_count: Arc::new(AtomicUsize::new(0)),
             }
@@ -328,7 +398,10 @@ mod tests {
 
     impl PcmReader for LoopingFakeReader {
         fn read(&mut self, buf: &mut [i16]) -> Result<PcmEvent, PcmError> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
+            let n_reads = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.max_reads.is_some_and(|m| n_reads > m) {
+                return Ok(PcmEvent::Fatal("scripted end".into()));
+            }
             match self.frames {
                 None => Ok(PcmEvent::Fatal("scripted device loss".into())),
                 Some(n) => {
@@ -352,8 +425,66 @@ mod tests {
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let cancel = stop.cancel.subscribe();
         let task_stop = Arc::clone(&stop);
-        tokio::task::spawn_blocking(move || run_reader_capture(reader, tx, task_stop, cancel));
+        tokio::task::spawn_blocking(move || run_reader_capture(reader, tx, task_stop, cancel, None));
         (CaptureHandle { rx, stop }, close_count)
+    }
+
+    /// A filter that negates every sample: proves the seam is in the
+    /// encode path (its bytes must differ from the unfiltered run).
+    struct SignFlip;
+
+    impl PcmFrameFilter for SignFlip {
+        fn process_frame(&mut self, frame: &mut [i16]) {
+            for s in frame.iter_mut() {
+                *s = s.wrapping_neg();
+            }
+        }
+
+        fn for_capture(&self) -> Box<dyn PcmFrameFilter> {
+            Box::new(SignFlip)
+        }
+    }
+
+    /// Run the reader pipeline to its scripted end with the given filter;
+    /// return every emitted byte (init segment + clusters).
+    async fn run_reader_bytes(filter: Option<Box<dyn PcmFrameFilter>>) -> Vec<u8> {
+        let reader = LoopingFakeReader::finite(960, 30);
+        let stop = Arc::new(HandleStop::new());
+        let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let cancel = stop.cancel.subscribe();
+        let task_stop = Arc::clone(&stop);
+        tokio::task::spawn_blocking(move || run_reader_capture(reader, tx, task_stop, cancel, filter));
+        let mut events = rx;
+        let mut bytes = Vec::new();
+        loop {
+            match timeout(WAIT, events.recv()).await.expect("timed out") {
+                Some(SourceEvent::Bytes(b)) => bytes.extend(b),
+                Some(SourceEvent::End(_)) => break,
+                None => break,
+            }
+        }
+        bytes
+    }
+
+    /// Regression (filter off): with no filter in the chain, frames reach
+    /// the Opus encoder untouched, so the capture output is byte-identical
+    /// to the pre-seam pipeline. A pass-through (null) filter is likewise
+    /// byte-identical; an active filter changes the bytes (the seam is in
+    /// the encode path).
+    #[tokio::test]
+    async fn filter_off_is_byte_identical_to_pre_seam_pipeline() {
+        let no_filter = run_reader_bytes(None).await;
+        let pass_through = run_reader_bytes(Some(Box::new(crate::audio::filter::PassThrough))).await;
+        let sign_flip = run_reader_bytes(Some(Box::new(SignFlip))).await;
+        assert!(!no_filter.is_empty(), "pipeline emitted nothing");
+        assert_eq!(
+            no_filter, pass_through,
+            "a no-op filter in the chain must be byte-identical to no filter"
+        );
+        assert_ne!(
+            no_filter, sign_flip,
+            "an active filter must change the encoded bytes"
+        );
     }
 
     /// G13: the fake-reader pipeline composes correctly — init before any
