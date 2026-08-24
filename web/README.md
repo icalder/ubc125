@@ -60,6 +60,27 @@ permissive).
 need a `cargo build` and a stack restart — there is no hot reload in any
 build.
 
+### Working on the pages locally (no scanner required)
+
+Do **not** open `dist/index.html` with a double-click: browsers refuse to
+load ES modules (and the import map) over `file://`, so `app.js` never runs
+and you get a blank page with a "module load" error. Serve the folder over
+HTTP instead. `dist/` is a flat tree of static files, so any static server
+works — `python3` is sufficient:
+
+```sh
+cd web/dist
+python3 -m http.server 8137
+# open http://localhost:8137/
+```
+
+(Or a Node dev server, `npx --yes serve -l 8137 .`, if you prefer.) The UI
+renders fine against a **down** backend — it just shows "OFFLINE — waiting
+for scanner..." in the help bar, since there is no gRPC server. That is fine
+for editing pages. To exercise real RPCs without hardware, run the fake
+scanner stack (`bash tests/ubc125_stack.sh`) and open
+`http://localhost:8137/?server=http://127.0.0.1:50051`.)
+
 ## Tests
 
 ```sh
