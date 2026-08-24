@@ -69,23 +69,21 @@ const watchAudio = async (want, timeoutMs) => {
   return seen;
 };
 
-const clickBtn = (label) =>
-  p.evaluate((t) => {
-    const e = [...document.querySelectorAll("button.btn")].find(
-      (x) => x.textContent.includes(t) && !x.disabled,
-    );
-    if (!e) return false;
+// Play/Stop render as SVG icons, so the buttons are selected by their
+// data-key attribute (the scanner key label), not by visible text.
+const clickBtn = (key) =>
+  p.evaluate((k) => {
+    const e = document.querySelector(`button.btn[data-key="${k}"]`);
+    if (!e || e.disabled) return false;
     e.click();
     return true;
-  }, label);
+  }, key);
 
-const btnEnabled = (label) =>
-  p.evaluate((t) => {
-    const e = [...document.querySelectorAll("button.btn")].find(
-      (x) => x.textContent.includes(t),
-    );
+const btnEnabled = (key) =>
+  p.evaluate((k) => {
+    const e = document.querySelector(`button.btn[data-key="${k}"]`);
     return e ? !e.disabled : null;
-  }, label);
+  }, key);
 
 const pgrep = (pattern) =>
   execSync(`pgrep -f '${pattern}' || true`).toString().trim();
@@ -120,14 +118,14 @@ await p.goto("http://127.0.0.1:50051/", { waitUntil: "networkidle2" });
 await sleep(1500);
 
 ok((await audioState()) === "off", "audio defaults to off");
-ok((await btnEnabled("Stop")) === false, "Stop disabled while off");
-ok((await btnEnabled("Play")) === true, "Play enabled while off");
+ok((await btnEnabled("x")) === false, "Stop disabled while off");
+ok((await btnEnabled("p")) === true, "Play enabled while off");
 
-ok(await clickBtn("p: Play"), "Play clicked");
+ok(await clickBtn("p"), "Play clicked");
 const seenA = await watchAudio("playing", 15000);
 ok(seenA.includes("playing"), `reaches playing (saw: ${seenA.join(" -> ")})`);
-ok(await btnEnabled("Stop"), "Stop enabled while playing");
-ok(!(await btnEnabled("Play")), "Play disabled while playing");
+ok(await btnEnabled("x"), "Stop enabled while playing");
+ok(!(await btnEnabled("p")), "Play disabled while playing");
 
 // The finite file ends: the generation closes cleanly and the client
 // reconnects (1 s backoff) into a new generation replaying from the top.
@@ -142,7 +140,7 @@ ok(
   `next generation replays -> playing again (saw: ${seenReplay.join(" -> ")})`,
 );
 
-ok(await clickBtn("x: Stop"), "Stop clicked");
+ok(await clickBtn("x"), "Stop clicked");
 const seenStop = await watchAudio("off", 5000);
 ok(seenStop.includes("off"), `stop -> off (saw: ${seenStop.join(" -> ")})`);
 await sleep(500);
@@ -169,7 +167,7 @@ await p.emulateNetworkConditions({
   download: 64 * 1024,
   upload: 8 * 1024,
 });
-ok(await clickBtn("p: Play"), "Play clicked (throttled)");
+ok(await clickBtn("p"), "Play clicked (throttled)");
 const seenThrottled = await watchAudio("reconnecting", 45000);
 ok(
   seenThrottled.includes("reconnecting"),
@@ -207,10 +205,8 @@ await sleep(1500);
 // Trusted click (CDP input, not the page's untrusted .click()) so the
 // autoplay policy really starts the element: the playhead checks below
 // are meaningless for a paused element.
-const play2 = await p2.evaluateHandle(() =>
-  [...document.querySelectorAll("button.btn")].find(
-    (x) => x.textContent.includes("Play") && !x.disabled
-  )
+const play2 = await p2.evaluateHandle(
+  () => document.querySelector('button.btn[data-key="p"]:not(:disabled)')
 );
 await play2.click();
 const seenLate = await watchAudio2("playing", 15000);
@@ -247,7 +243,7 @@ ok(t2 > t1, `late joiner playhead advances (t1=${t1}s, t2=${t2}s)`);
 // and keep a tone source alive, failing the leftover-process check below.
 await p2.close();
 
-ok(await clickBtn("x: Stop"), "Stop clicked (unthrottled)");
+ok(await clickBtn("x"), "Stop clicked (unthrottled)");
 await watchAudio("off", 5000);
 await sleep(500);
 // Bracket trick: the pattern must not appear literally in the command line

@@ -1,6 +1,7 @@
 // Monitor view (tab 0): Scanner Info, Live Scan, Actions, Active Banks.
 // Mirrors render_monitor_view / render_bank_status in src/cmd/renderer.rs.
 import { el, box, setText, setClass, setDisabled } from "../components/box.js";
+import { playIcon, stopIcon } from "../components/icons.js";
 import { toDisplay } from "../lib/freq.js";
 
 /** Chip label for a 1-based bank number; bank 10 shows `[0]` (console `bank_num % 10` quirk). */
@@ -54,14 +55,16 @@ export function createMonitor(container, { onScan, onHold, onToggleBank, onAudio
     ),
   );
 
-  // Actions: buttons are wired once and never replaced.
-  const scan = el("button", { class: "btn", text: "s: Scan" });
+  // Actions: buttons are wired once and never replaced. data-key carries
+  // the scanner key label and is the stable hook the E2E scripts select
+  // on (play/stop render as icons, so their visible text is not stable).
+  const scan = el("button", { class: "btn", "data-key": "s", text: "s: Scan" });
   scan.addEventListener("click", onScan);
-  const hold = el("button", { class: "btn", text: "h: Hold" });
+  const hold = el("button", { class: "btn", "data-key": "h", text: "h: Hold" });
   hold.addEventListener("click", onHold);
-  const play = el("button", { class: "btn", text: "p: Play" });
+  const play = el("button", { class: "btn", "data-key": "p", text: "p:" }, playIcon());
   play.addEventListener("click", onAudioPlay);
-  const stop = el("button", { class: "btn", text: "x: Stop" });
+  const stop = el("button", { class: "btn", "data-key": "x", text: "x:" }, stopIcon());
   stop.addEventListener("click", onAudioStop);
   // The state span is what the E2E scripts read; its class carries the
   // state for colouring.

@@ -398,6 +398,23 @@ body {
   color: inherit;
 }
 
+/* Play/stop icons in the action buttons (components/icons.js): em-sized
+   so they track the button font, fills from the theme palette. */
+.icon {
+  width: 2em;
+  height: 2em;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.icon-play {
+  fill: var(--green);
+}
+
+.icon-stop {
+  fill: var(--red);
+}
+
 /* Bank table while channels are being fetched (mirrors console "Loading..."). */
 .table.loading {
   opacity: 0.45;

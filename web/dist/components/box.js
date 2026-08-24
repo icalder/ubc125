@@ -1,14 +1,19 @@
 // Small DOM helpers shared by views. No state, no imports.
 
-/** Create an element with optional class, text, and children. */
+/**
+ * Create an element with optional class, text, and children. Any other
+ * option is set as an attribute (e.g. `{ "data-key": "p" }`).
+ */
 export function el(tag, opts = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(opts)) {
     if (key === "class") node.className = value;
     else if (key === "text") node.textContent = value;
-    else if (key === "disabled" && value) node.disabled = true;
+    else if (key === "disabled") node.disabled = !!value;
     else if (key.startsWith("on") && typeof value === "function") {
       node.addEventListener(key.slice(2), value);
+    } else if (value != null) {
+      node.setAttribute(key, value);
     }
   }
   for (const child of children) {
