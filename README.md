@@ -47,7 +47,7 @@ Notes:
 - The service runs as a dynamic user with the `dialout` (ttyACM* access) and `audio` (ALSA mic capture) groups.
 - If the scanner is not connected at boot, `serve` fails and systemd retries every 10 s until it appears.
 - The web UI and gRPC/gRPC-Web listen on the same port (`0.0.0.0:50051` by default), so it is reachable from other machines on the LAN.
-- `declick = true` enables the experimental squelch de-clicker on the audio pipeline (a 1000 ms floor-anchored close fade and a 20 ms onset fade) — the same as the `serve --declick` flag / `UBC125_DECLICK` env var. It is off by default and only affects the native ALSA audio capture, not the `--audio-cmd` test hook.
+- `declick = true` enables the de-click filter on the audio pipeline: a plateau-trigger de-clicker (`src/audio/clickfilter/`, a 1:1 port of `../ubc125-ml/src/clickfilter/`) running the T3 record config — interpolation for short clicks, descend for long ones, 150 ms long tail — with a fixed 20.5 ms output delay (the first chunk of every capture generation is silence). Same as the `serve --declick` flag / `UBC125_DECLICK` env var. It is off by default and only affects the native ALSA audio capture, not the `--audio-cmd` test hook.
 
 For console mode (the Ratatui TUI) you still need a real TTY: `ssh -t itcalde@alarmpi .../ubc125 console` or a physical terminal.
 

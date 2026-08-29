@@ -1,5 +1,12 @@
 # De-clicker — current plan
 
+> **Superseded.** The squelch-gate plan in this document is superseded by
+> [ML-PORT-PLAN.md](./ML-PORT-PLAN.md): `src/audio/squelch.rs` and
+> `examples/squelch_gate.rs` are removed, and `--declick` now enables the
+> plateau-trigger de-clicker ported 1:1 from `../ubc125-ml/src/clickfilter/`
+> (T3 record config, fixed 20.5 ms delay, off by default). The sections below
+> are kept as the history of the squelch-gate workstream.
+
 Working plan for the de-clicker on the `declick-next` branch. The wavelet
 approach is abandoned; its history is preserved on the `declick` branch and
 is not carried forward.

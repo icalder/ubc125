@@ -1,5 +1,12 @@
 # ML de-clicker — separate workstream
 
+> **Status (superseded for the interim path):** the classifier workstream in
+> `../ubc125-ml` produced the plateau-trigger de-clicker, which has now been
+> ported 1:1 into this repo (`src/audio/clickfilter/`) and **is** the
+> `--declick` filter, running the T3 record config (see
+> [ML-PORT-PLAN.md](./ML-PORT-PLAN.md)). T3 is a development policy: the flag
+> stays off by default. The squelch-gate interim path below is removed.
+
 ## Purpose
 
 Develop a small machine-learning classifier that recognises scanner audio
@@ -11,20 +18,21 @@ The ML work must remain separate from the current interim de-clicker.
 
 ## Interim path
 
-Keep the current squelch gate available through:
+> **Superseded.** The squelch gate (`src/audio/squelch.rs`) and its
+> `examples/squelch_gate.rs` harness are removed; `--declick` now enables the
+> ported plateau-trigger filter (T3 record config, fixed 20.5 ms delay) on the
+> native ALSA capture only. `--audio-cmd` and `audio-tone` remain unfiltered.
 
-```sh
-ubc125 serve --declick
-```
+The original interim path used a 20 ms fade-in and a 1000 ms floor-anchored
+fade-out.
+It was useful for live testing, but it was not a locked long-term solution.
+The generic gate had to wait for the noise floor to confirm that a
+transmission ended. A closing click can occur before that confirmation, so a
+long look-back fade was needed. The longer fade could attenuate the final
+speech.
 
-The interim path uses a 20 ms fade-in and a 1000 ms floor-anchored fade-out.
-It is useful for live testing, but it is not a locked long-term solution.
-The generic gate must wait for the noise floor to confirm that a transmission
-ended. A closing click can occur before that confirmation, so a long
-look-back fade is needed. The longer fade can attenuate the final speech.
-
-The ML classifier would address this timing problem by recognising the click
-at, or shortly after, the click itself.
+The classifier workstream addressed this timing problem by recognising the
+click at, or shortly after, the click itself.
 
 ## Why a separate ML workstream
 
@@ -39,8 +47,10 @@ preceding speech. A classifier can provide a separate decision about whether
 a transient is a click or speech, while the squelch gate continues to handle
 noise-floor muting.
 
-Do not replace the interim gate until the classifier is validated on unseen
-recordings.
+> **Superseded.** The classifier is ported in and is now the `--declick`
+> filter, pending hardware and Pi-CPU validation (see
+> [ML-PORT-PLAN.md](./ML-PORT-PLAN.md), verification steps 4–5); the flag
+> stays off by default until that is done.
 
 ## Corpus
 

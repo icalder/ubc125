@@ -273,7 +273,13 @@ fn run_reader_capture<R: PcmReader>(
     };
     if let Some(f) = filter.as_mut() {
         for frame in f.flush() {
-            let Ok(closed) = pipeline.add_frame(&frame) else {
+            // The encoder takes exactly one 960-sample frame, but a stateful
+            // filter's final held chunk can be ragged (the de-clicker's steady
+            // state holds 984 samples, so flush yields [960, 24]): zero-pad it.
+            // This appends at most 20 ms of trailing silence to the generation.
+            let mut padded = frame;
+            padded.resize(FRAME_SAMPLES, 0);
+            let Ok(closed) = pipeline.add_frame(&padded) else {
                 let _ = reader.close();
                 finish(&tx, &stop, SourceExit::Failed("encode failed".into()));
                 return;
@@ -351,7 +357,11 @@ fn run_tone_capture(
     };
     if let Some(f) = filter.as_mut() {
         for frame in f.flush() {
-            let Ok(closed) = pipeline.add_frame(&frame) else {
+            // Zero-pad a ragged final held chunk to a full frame (see the
+            // reader loop); at most 20 ms of trailing silence.
+            let mut padded = frame;
+            padded.resize(FRAME_SAMPLES, 0);
+            let Ok(closed) = pipeline.add_frame(&padded) else {
                 finish(&tx, &stop, SourceExit::Failed("encode failed".into()));
                 return;
             };
@@ -478,6 +488,14 @@ mod tests {
     /// Run the reader pipeline to its scripted end with the given filter;
     /// return every emitted byte (init segment + clusters).
     async fn run_reader_bytes(filter: Option<Box<dyn PcmFrameFilter>>) -> Vec<u8> {
+        run_reader_bytes_with_exit(filter).await.0
+    }
+
+    /// As `run_reader_bytes`, but also reports how the capture ended — the
+    /// padded ragged-flush test below must rule out an encode failure.
+    async fn run_reader_bytes_with_exit(
+        filter: Option<Box<dyn PcmFrameFilter>>,
+    ) -> (Vec<u8>, Option<SourceExit>) {
         let reader = LoopingFakeReader::finite(960, 30);
         let stop = Arc::new(HandleStop::new());
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
@@ -486,14 +504,18 @@ mod tests {
         tokio::task::spawn_blocking(move || run_reader_capture(reader, tx, task_stop, cancel, filter));
         let mut events = rx;
         let mut bytes = Vec::new();
+        let mut exit = None;
         loop {
             match timeout(WAIT, events.recv()).await.expect("timed out") {
                 Some(SourceEvent::Bytes(b)) => bytes.extend(b),
-                Some(SourceEvent::End(_)) => break,
+                Some(SourceEvent::End(e)) => {
+                    exit = Some(e);
+                    break;
+                }
                 None => break,
             }
         }
-        bytes
+        (bytes, exit)
     }
 
     /// Regression (filter off): with no filter in the chain, frames reach
@@ -515,6 +537,68 @@ mod tests {
             no_filter, sign_flip,
             "an active filter must change the encoded bytes"
         );
+    }
+
+    /// The de-clicker's steady-state flush holds the 984-sample delay line
+    /// and emits it as [960, 24]: the ragged 24-sample chunk must be
+    /// zero-padded at the seam and encoded, not rejected. 30 input frames
+    /// therefore become 32 encoded frames — four clusters at 0/200/400/600 ms
+    /// (the unfiltered run closes exactly three, at 0/200/400) — and the
+    /// capture still ends `Clean`.
+    #[tokio::test]
+    async fn declick_ragged_flush_is_padded_at_the_seam() {
+        use crate::audio::clickfilter::config::Config;
+        use crate::audio::clickfilter::constants::{ClickClass, Policy};
+        // The record configuration, same as the wiring in src/cmd/serve.rs.
+        let cfg = Config::builder()
+            .policy(Policy::Interp)
+            .policy_override(ClickClass::Long, Policy::Descend)
+            .tail_ms(ClickClass::Long, 150.0)
+            .build();
+        let filter = Box::new(crate::audio::InPlaceDeClick::new(&cfg));
+        let (bytes, exit) = run_reader_bytes_with_exit(Some(filter)).await;
+        // The finite fake reader ends `Failed("scripted end")`; the failure
+        // mode this test exists to rule out is an encode rejection of the
+        // padded ragged chunk.
+        assert!(
+            !matches!(exit, Some(SourceExit::Failed(ref reason)) if reason == "encode failed"),
+            "the padded ragged flush chunk must encode: {exit:?}"
+        );
+        let mut segmenter = WebmSegmenter::new(DEFAULT_MAX_SEGMENT_SIZE);
+        let segments = segmenter.feed(&bytes).unwrap();
+        assert!(matches!(&segments[0], Segment::Init(_)), "init precedes media");
+        let timecodes: Vec<u64> = segments[1..]
+            .iter()
+            .map(|s| {
+                let Segment::Media(bytes) = s else {
+                    unreachable!("only clusters after init")
+                };
+                parse_cluster_timecode(bytes)
+            })
+            .collect();
+        assert_eq!(
+            timecodes,
+            vec![0, 200, 400, 600],
+            "30 input frames + 2 flush frames (984 held) = 32 blocks in four clusters"
+        );
+        // Control: the unfiltered run encodes exactly the 30 read frames.
+        let (unfiltered, exit) = run_reader_bytes_with_exit(None).await;
+        assert!(
+            !matches!(exit, Some(SourceExit::Failed(ref reason)) if reason == "encode failed"),
+            "unfiltered control run: {exit:?}"
+        );
+        let mut segmenter = WebmSegmenter::new(DEFAULT_MAX_SEGMENT_SIZE);
+        let segments = segmenter.feed(&unfiltered).unwrap();
+        let timecodes: Vec<u64> = segments[1..]
+            .iter()
+            .map(|s| {
+                let Segment::Media(bytes) = s else {
+                    unreachable!("only clusters after init")
+                };
+                parse_cluster_timecode(bytes)
+            })
+            .collect();
+        assert_eq!(timecodes, vec![0, 200, 400]);
     }
 
     /// G13: the fake-reader pipeline composes correctly — init before any
@@ -570,16 +654,19 @@ mod tests {
     /// Read the Cluster::Timecode (big-endian uint) from a cluster
     /// element: id (4 B) + size vint, then the Timecode child element.
     fn parse_cluster_timecode(cluster: &[u8]) -> u64 {
-        // [CLUSTER_ID 4 bytes][size vint][TIMECODE_ID 1][size 1][uint...]
+        // [CLUSTER_ID 4 bytes][size vint][TIMECODE_ID 1][size vint][uint...]
         assert_eq!(&cluster[..4], &[0x1F, 0x43, 0xB6, 0x75], "cluster id");
         let size_len = vint_width(cluster[4]);
         let mut pos = 4 + size_len;
         assert_eq!(cluster[pos], 0xE7, "first child must be Timecode");
         pos += 1;
-        let len = vint_width(cluster[pos]);
-        pos += 1;
+        // The Timecode's size vint gives the number of value bytes; the
+        // value itself is plain big-endian. (The old code used the vint's
+        // *width* as the byte count, which is wrong for 0x82 and up, i.e.
+        // clusters at 256 ms and later.)
+        let value_len = vint_value(&cluster[pos..]) as usize;
         let mut v = 0u64;
-        for &b in &cluster[pos..pos + len] {
+        for &b in &cluster[pos + 1..pos + 1 + value_len] {
             v = (v << 8) | b as u64;
         }
         v
@@ -595,6 +682,18 @@ mod tests {
             0x01..=0x07 => 8,
             _ => panic!("invalid vint first byte {first:#04x}"),
         }
+    }
+
+    /// Value of the vint whose first byte is `bytes[0]`: the marker's low
+    /// bits plus the continuation bytes, 7 value bits each.
+    fn vint_value(bytes: &[u8]) -> u64 {
+        let marker = bytes[0];
+        let width = vint_width(marker);
+        let mut v = (marker & (0xFF >> width)) as u64;
+        for &b in &bytes[1..width] {
+            v = (v << 7) | (b & 0x7F) as u64;
+        }
+        v
     }
 
     /// G12: a scripted fatal device error ends the source `Failed` (the

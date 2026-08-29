@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use crate::audio::clickfilter::config::Config;
+use crate::audio::clickfilter::constants::{ClickClass, Policy};
 use crate::audio::{
-    AlsaOpusSource, AudioBroadcaster, CaptureSource, CommandSource, SquelchGate,
-    SquelchGateConfig, DEFAULT_AUDIO_DEVICE,
+    AlsaOpusSource, AudioBroadcaster, CaptureSource, CommandSource, InPlaceDeClick,
+    DEFAULT_AUDIO_DEVICE,
 };
 use crate::scanner::ScannerClient;
 use crate::server;
@@ -37,9 +39,12 @@ pub struct ServeArgs {
     /// the native capture; its stdout is the WebM byte stream.
     #[arg(long, env = "UBC125_AUDIO_CMD", hide = true)]
     pub audio_cmd: Option<String>,
-    /// Enable the experimental squelch de-clicker. This uses the current
-    /// interim 1000 ms floor-anchored close fade and a 20 ms onset fade.
-    /// The test audio-command hook is already WebM and is not filtered.
+    /// Enable the de-click filter: the plateau-trigger classifier ported from
+    /// the ML prototype (T3 config of record — `interp` base, `long` clicks
+    /// get a `descend` fill with a 150 ms recovery tail). Adds a fixed
+    /// 20.5 ms (984-sample) output delay; the first chunk of each capture
+    /// generation is silence. The test audio-command hook is already WebM
+    /// and is not filtered.
     #[arg(long, env = "UBC125_DECLICK", default_value_t = false)]
     pub declick: bool,
 }
@@ -55,11 +60,14 @@ fn audio_source(args: &ServeArgs) -> Arc<dyn CaptureSource> {
         ])),
         None => {
             let filter = if args.declick {
-                let config = SquelchGateConfig {
-                    fade_out_ms: 1_000,
-                    ..SquelchGateConfig::default()
-                };
-                Some(Arc::new(SquelchGate::new(config)))
+                // T3 config of record (../ubc125-ml/docs/prototype.md, arm 3):
+                // interp base, long -> descend with a 150 ms recovery tail.
+                let config = Config::builder()
+                    .policy(Policy::Interp)
+                    .policy_override(ClickClass::Long, Policy::Descend)
+                    .tail_ms(ClickClass::Long, 150.0)
+                    .build();
+                Some(Arc::new(InPlaceDeClick::new(&config)))
             } else {
                 None
             };
