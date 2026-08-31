@@ -115,6 +115,136 @@ export function decideJoinKind(decision, bufferedStart) {
 }
 
 /**
+ * How close to the end of a buffered range a playhead counts as stalled (s).
+ *
+ * A live append extends the buffer continuously, so a playhead within this
+ * distance of a range end and with a later range behind it is not waiting for
+ * data — MSE has stopped it at a gap. Short enough that the skip costs little
+ * audio, long enough that a normal append in flight is not skipped over.
+ */
+export const GAP_STALL_S = 0.12;
+
+/** Audio kept behind the playhead by the SourceBuffer head trim (s). */
+export const TRIM_HEAD_KEEP_S = 3;
+
+/** How far ahead of the playhead the buffered tail may run (s). */
+export const TRIM_TAIL_CAP_S = 10;
+
+/** Landing point of a live-edge catch-up: this far before the buffered tail (s). */
+export const LIVE_KEEP_AHEAD_S = 1.5;
+
+/**
+ * The forward seek a stalled playhead needs (B8: skip, never wait).
+ *
+ * Dropping whole chunks is normal policy (B5: bounded queues, drop-oldest),
+ * so a hole in the buffered timeline is normal too. MSE stops the playhead at
+ * the end of a buffered range and waits, which is a permanent freeze — the
+ * label keeps saying "playing" while the audio is gone. Two shapes of that
+ * freeze, and both seek forward:
+ *   - the playhead sits at the tail of a range and a later range exists →
+ *     seek to that range's start;
+ *   - the playhead sits in a hole (or behind the buffer head: a late join, or
+ *     a head the trim has discarded) → seek to the next buffered sample.
+ * Without the second case a playhead left between two ranges stays there
+ * forever — measured 19.8 s of silence under a "playing" label once the tail
+ * cap actually fired.
+ *
+ * @param {object} state
+ * @param {Array<[number,number]>} ranges the SourceBuffer's buffered ranges, in order
+ * @param {number} currentTime the playhead position (s)
+ * @param {number} [stallS] how close to a range end counts as stalled
+ * @returns {number|null} the seek target, or null when there is nothing to skip to
+ */
+export function gapSkip({ ranges, currentTime, stallS = GAP_STALL_S }) {
+  for (const [i, range] of ranges.entries()) {
+    const [start, end] = range;
+    if (currentTime < start) {
+      // The playhead sits in a hole — between two ranges, or behind the
+      // buffer head (a late join, or a head that the trim has already
+      // discarded). Resume at the next buffered sample.
+      return start > currentTime + 0.001 ? start : null;
+    }
+    if (currentTime <= end) {
+      // Inside this range; only its tail matters. Away from the tail an
+      // append in flight would have extended it — not a stall.
+      if (currentTime < end - stallS) return null;
+      const next = ranges[i + 1];
+      // No later range means the live edge: waiting there is correct.
+      return next && next[0] > currentTime + 0.001 ? next[0] : null;
+    }
+    // Past this range's end: the next iteration decides (hole or live edge).
+  }
+  return null;
+}
+
+/** Minimum milliseconds between live-edge catch-up seeks. */
+export const CATCHUP_MIN_INTERVAL_MS = 500;
+
+/**
+ * Where to seek when the buffered tail has run far ahead of the playhead.
+ *
+ * Removing a far-ahead tail is not a fix on its own: a producer faster than
+ * real time — the `audio-tone --loop` test fixture runs ~250x — appends past
+ * the removed window, so the playhead starves at the hole while the label
+ * still says "playing" (measured: silent for the rest of a 24 s run, the
+ * SourceBuffer gone). Bounding held audio and keeping the playhead near live
+ * are the same requirement, so the client jumps to the live edge instead,
+ * and the ranges it passes are then behind the playhead and trimmed. Against
+ * the scanner (append rate ~1x) the tail is ~1 s ahead and this never fires.
+ *
+ * @param {object} state
+ * @param {Array<[number,number]>} ranges the buffered ranges, in order
+ * @param {number} currentTime the playhead position (s)
+ * @param {number} [tailCapS] how far ahead of the playhead the tail may run
+ * @param {number} [keepAheadS] landing distance before the buffered tail
+ * @returns {number|null} the seek target, or null when the playhead is in range
+ */
+export function liveEdgeSeek({
+  ranges,
+  currentTime,
+  tailCapS = TRIM_TAIL_CAP_S,
+  keepAheadS = LIVE_KEEP_AHEAD_S,
+}) {
+  if (ranges.length === 0) return null;
+  const [lastStart, tail] = ranges[ranges.length - 1];
+  if (tail - currentTime <= tailCapS) return null;
+  const target = Math.max(lastStart, tail - keepAheadS);
+  return target > currentTime + 0.001 ? target : null;
+}
+
+/**
+ * The next SourceBuffer window to remove (B7's mechanism, extracted so the
+ * math is testable): what is far behind the playhead.
+ *
+ * Nothing ahead of the playhead is removed here. A cap on the ahead side
+ * (the buffer's last range > playhead + TRIM_TAIL_CAP_S) was tried and
+ * starves the playhead whenever the producer runs faster than real time — see
+ * `liveEdgeSeek`, which bounds the same window by moving the playhead. Held
+ * audio stays bounded because everything the catch-up jumps past becomes
+ * behind-side audio and is trimmed on the next pass.
+ *
+ * @param {object} state
+ * @param {Array<[number,number]>} ranges the SourceBuffer's buffered ranges, in order
+ * @param {number} currentTime the playhead position (s)
+ * @param {number} [headKeepS] audio kept behind the playhead
+ * @returns {{from:number,to:number}|null} the window to remove, or null
+ */
+export function trimPlan({
+  ranges,
+  currentTime,
+  headKeepS = TRIM_HEAD_KEEP_S,
+}) {
+  if (ranges.length === 0) return null;
+  const head = ranges[0][0];
+  const tail = ranges[ranges.length - 1][1];
+  const removeHeadEnd = currentTime - headKeepS;
+  if (removeHeadEnd > head) {
+    return { from: head, to: Math.min(removeHeadEnd, tail) };
+  }
+  return null;
+}
+
+/**
  * FIFO of chunks waiting to be appended to the SourceBuffer.
  *
  * Guarantees no media is ever queued before an init segment has been seen
@@ -171,6 +301,22 @@ function once(el, event) {
 }
 
 /**
+ * The SourceBuffer's buffered ranges as plain [start, end] pairs (s), so
+ * gapSkip/trimPlan are pure functions unit-testable without a browser.
+ *
+ * @param {SourceBuffer|null} sb
+ * @returns {Array<[number,number]>}
+ */
+function bufferedRanges(sb) {
+  const ranges = [];
+  if (!sb) return ranges;
+  for (let i = 0; i < sb.buffered.length; i++) {
+    ranges.push([sb.buffered.start(i), sb.buffered.end(i)]);
+  }
+  return ranges;
+}
+
+/**
  * Plays the AudioService.Listen stream into a detached `<audio>` element.
  *
  * States: off -> connecting -> playing, with "reconnecting" on stream
@@ -200,6 +346,9 @@ export class AudioStream {
     this._wake = null; // waiter for the next queued chunk
     this._run = 0; // run id; stale loops observe a mismatch and exit
     this._lastTrim = 0;
+    this._gapSkips = 0; // B8 seeks over dropped-chunk gaps (this run)
+    this._lastCatchup = 0;
+    this._catchups = 0; // live-edge jumps (this run): audio deliberately lost
   }
 
   /** Can this browser play WebM/Opus through MediaSource? */
@@ -294,6 +443,11 @@ export class AudioStream {
           if (this._stopped || run !== this._run) return;
           const sb = this._sb;
           if (!sb) break; // generation discarded; re-check outer state
+          // A playhead MSE has stopped at a gap must not wait for audio that
+          // is never coming; seeking is not a SourceBuffer mutation, so this
+          // runs even while an update is in flight.
+          if (this._catchupIfNeeded()) continue;
+          if (this._gapSkipIfNeeded()) continue;
           if (sb.updating) {
             await once(sb, "updateend");
             continue;
@@ -350,6 +504,53 @@ export class AudioStream {
     if (this._joinKind !== "late") return false;
     const target = lateJoinSeek(sb.buffered.start(0));
     this._seeked = true;
+    audio.currentTime = target;
+    return true;
+  }
+
+  /**
+   * Jump a playhead that has fallen far behind the buffered tail (see
+   * `liveEdgeSeek`). Cadence-limited: against the faster-than-real-time test
+   * fixture the tail runs ahead again within a second, and a seek per second
+   * is enough to keep the client near live without thrashing.
+   *
+   * @returns {boolean} true when a seek was issued.
+   */
+  _catchupIfNeeded() {
+    const sb = this._sb;
+    const audio = this._audio;
+    if (!sb || !audio || audio.paused) return false;
+    const now = Date.now();
+    if (now - this._lastCatchup < CATCHUP_MIN_INTERVAL_MS) return false;
+    const target = liveEdgeSeek({
+      ranges: bufferedRanges(sb),
+      currentTime: audio.currentTime,
+    });
+    if (target === null) return false;
+    this._lastCatchup = now;
+    this._catchups++;
+    audio.currentTime = target;
+    return true;
+  }
+
+  /**
+   * Seek a playhead that MSE has stopped at a gap (see `gapSkip`). Not
+   * cadence-limited: MSE stops the playhead dead at a range end, so waiting
+   * costs silence, and a repeat seek to the same target is impossible (the
+   * target is ahead of the playhead and the playhead moves after it).
+   *
+   * @returns {boolean} true when a seek was issued.
+   */
+  _gapSkipIfNeeded() {
+    const sb = this._sb;
+    const audio = this._audio;
+    if (!sb || !audio || audio.paused) return false;
+    const target = gapSkip({
+      ranges: bufferedRanges(sb),
+      currentTime: audio.currentTime,
+    });
+    if (target === null) return false;
+    this._gapSkips++;
     audio.currentTime = target;
     return true;
   }
@@ -429,19 +630,13 @@ export class AudioStream {
     if (!sb || !audio || sb.updating || sb.buffered.length === 0) return false;
     if (performance.now() - this._lastTrim < 2000) return false;
     this._lastTrim = performance.now();
-    const head = sb.buffered.start(0);
-    const tail = sb.buffered.end(0);
-    const removeHeadEnd = Math.max(head, audio.currentTime - 3);
-    if (removeHeadEnd > head) {
-      sb.remove(head, Math.min(removeHeadEnd, tail));
-      return true; // one range per pass
-    }
-    const tailLimit = audio.currentTime + 10;
-    if (tail > tailLimit) {
-      sb.remove(Math.max(head, tailLimit - 3), tail);
-      return true;
-    }
-    return false;
+    const plan = trimPlan({
+      ranges: bufferedRanges(sb),
+      currentTime: audio.currentTime,
+    });
+    if (!plan) return false;
+    sb.remove(plan.from, plan.to); // one window per pass
+    return true;
   }
 
   /** Wait until a chunk is queued (or the run is torn down). */

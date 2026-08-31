@@ -3,9 +3,15 @@ import assert from "node:assert/strict";
 import {
   AUDIO_MIME,
   AUDIO_STATES,
+  GAP_STALL_S,
+  TRIM_HEAD_KEEP_S,
+  LIVE_KEEP_AHEAD_S,
   audioTransition,
+  gapSkip,
   lateJoinSeek,
+  liveEdgeSeek,
   decideJoinKind,
+  trimPlan,
   ChunkQueue,
 } from "../lib/audio.js";
 
@@ -169,4 +175,139 @@ test("ChunkQueue: reset clears everything including init state", () => {
   assert.equal(q.size, 0);
   // After reset, media is dropped again until the next init.
   assert.equal(q.push(media(1)), false);
+});
+
+// -- B8 gap skip -------------------------------------------------------------
+
+test("gapSkip: a playhead inside a range is not stalled", () => {
+  assert.equal(gapSkip({ ranges: [[0, 10]], currentTime: 5 }), null);
+  assert.equal(gapSkip({ ranges: [], currentTime: 0 }), null);
+});
+
+test("gapSkip: a playhead at a range tail seeks to the next range", () => {
+  const ranges = [
+    [0, 10],
+    [12, 20],
+  ];
+  // 0.02 s from the end: MSE is about to stop the playhead at the gap.
+  assert.equal(gapSkip({ ranges, currentTime: 9.98 }), 12);
+  // Exactly the stall distance counts as stalled (>= boundary, T5).
+  assert.equal(gapSkip({ ranges, currentTime: 10 - GAP_STALL_S }), 12);
+  // Just outside it does not (an append in flight must not be skipped over).
+  assert.equal(gapSkip({ ranges, currentTime: 10 - GAP_STALL_S - 0.001 }), null);
+});
+
+test("gapSkip: the live edge has nothing to skip to", () => {
+  // At the end of the LAST range the playhead is waiting for the next
+  // chunk, which is correct — waiting there is not a stall.
+  assert.equal(gapSkip({ ranges: [[0, 10]], currentTime: 9.99 }), null);
+  assert.equal(gapSkip({ ranges: [[5, 10], [12, 20]], currentTime: 19.99 }), null);
+});
+
+test("gapSkip: a playhead inside a hole resumes at the next range", () => {
+  // The trim drops heads and tails, and drop-oldest drops middle chunks, so
+  // the playhead can sit between ranges. Restricted to "only inside a range"
+  // (the first version) that state never recovered: 19.8 s of silence under a
+  // "playing" label once the tail cap actually fired.
+  assert.equal(
+    gapSkip({
+      ranges: [
+        [6.3, 15],
+        [2000, 2001],
+      ],
+      currentTime: 15.4,
+    }),
+    2000,
+  );
+});
+
+test("gapSkip: a playhead behind the buffer head jumps to the head", () => {
+  // A late join, or a head the trim has already removed. lateJoinSeek does
+  // the join case once per generation; this keeps working after it.
+  assert.equal(
+    gapSkip({ ranges: [[6.3, 15], [2000, 2001]], currentTime: 0 }),
+    6.3,
+  );
+});
+
+test("gapSkip: a playhead past everything has nothing buffered to skip to", () => {
+  assert.equal(gapSkip({ ranges: [[0, 10], [12, 20]], currentTime: 25 }), null);
+});
+
+test("gapSkip: skips walk forward through consecutive gaps", () => {
+  const ranges = [
+    [0, 10],
+    [12, 12.05],
+    [30, 40],
+  ];
+  let t = 9.95;
+  const seen = [];
+  for (let i = 0; i < 5; i++) {
+    const target = gapSkip({ ranges, currentTime: t });
+    if (target === null) break;
+    seen.push(target);
+    t = target;
+  }
+  assert.deepEqual(seen, [12, 30]);
+});
+
+// -- buffer caps -------------------------------------------------------------
+
+test("trimPlan: audio far behind the playhead is removed", () => {
+  assert.deepEqual(
+    trimPlan({ ranges: [[0, 12]], currentTime: 10 }),
+    { from: 0, to: 10 - TRIM_HEAD_KEEP_S },
+  );
+  // Nothing far behind: no window (yet).
+  assert.equal(trimPlan({ ranges: [[0, 12]], currentTime: 2 }), null);
+});
+
+test("trimPlan: nothing ahead of the playhead is removed", () => {
+  // A cap enforced by remove() starves the playhead whenever the producer
+  // runs faster than real time: the removed window is re-appended beyond the
+  // playhead, and MSE leaves it stranded (measured: silent for the rest of a
+  // 24 s run). The ahead side is bounded by moving the playhead — liveEdgeSeek.
+  assert.equal(trimPlan({ ranges: [[9, 40]], currentTime: 10 }), null);
+  // The buffered timeline runs 3995 s past the playhead: still no removal.
+  assert.equal(trimPlan({ ranges: [[4, 4000]], currentTime: 5 }), null);
+});
+
+test("trimPlan: an empty buffer has no window", () => {
+  assert.equal(trimPlan({ ranges: [], currentTime: 5 }), null);
+});
+
+// -- live-edge catch-up ------------------------------------------------------
+
+test("liveEdgeSeek: a tail inside the cap is left alone", () => {
+  assert.equal(
+    liveEdgeSeek({ ranges: [[0, 18]], currentTime: 10, tailCapS: 10 }),
+    null,
+  );
+});
+
+test("liveEdgeSeek: a tail beyond the cap is jumped to", () => {
+  // Landing short of the very end, so the next chunk still arrives in time.
+  assert.equal(
+    liveEdgeSeek({
+      ranges: [
+        [6.3, 15],
+        [900, 1900],
+      ],
+      currentTime: 9.29,
+    }),
+    1900 - LIVE_KEEP_AHEAD_S,
+  );
+});
+
+test("liveEdgeSeek: the landing is clamped to the last range's start", () => {
+  // A short final range must not be landed *before* it begins (that would
+  // re-create the hole the jump exists to close).
+  assert.equal(
+    liveEdgeSeek({ ranges: [[94, 95]], currentTime: 5 }),
+    94,
+  );
+});
+
+test("liveEdgeSeek: an empty buffer has nowhere to jump", () => {
+  assert.equal(liveEdgeSeek({ ranges: [], currentTime: 5 }), null);
 });

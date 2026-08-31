@@ -106,11 +106,22 @@ The Monitor view's Play/Stop (`p`/`x`) stream the scanner's audio through
   `srcObject = <main-thread MediaSource>` (only `MediaStream` / worker
   `MediaSourceHandle` are accepted there). The object URL is revoked on
 discard/teardown.
-- Bounded buffering: the append loop drains while `updateend` is pending;
-  trim keeps ~3 s behind the playhead and **caps the tail at ~10 s ahead**
-  (a faster-than-real-time source without the cap wedges the tab). Trim and
-  append must not interleave on one pass (`InvalidStateError`) —
+- Bounded buffering, one mechanism per side of the playhead. Behind it,
+  `trimPlan()` removes (keeps ~3 s). Ahead of it, nothing is removed —
+  `liveEdgeSeek()` jumps the playhead to the live edge when the buffered tail
+  runs more than `TRIM_TAIL_CAP_S` (10 s) ahead, and what it passes becomes
+  behind-side audio and is trimmed next pass. Removing ahead instead of
+  jumping starves the playhead whenever the producer is faster than real time
+  (measured: silent for the rest of a run, `tests/web/web_latency_test.mjs`).
+  Trim and append must not interleave on one pass (`InvalidStateError`) —
   `_trimIfNeeded()` reports whether it trimmed and the loop `continue`s.
+- Skipped audio, not stalled audio: the server drops a slow client's oldest
+  chunks, which leaves holes in the buffered timeline, and MediaSource stops
+  the playhead at a hole instead of noticing — the label reads "playing" over
+  silence. `gapSkip()` (pure) is consulted on every append-loop pass: at a
+  range tail with a later range behind it, inside a hole, or behind the buffer
+  head, it seeks forward. At the end of the *last* range waiting is correct —
+  that is the live edge, not a gap.
 - Late joiners: one capture generation serves all `Listen` subscribers,
   and its cluster timecodes are absolute from generation start. A client
   that joins mid-generation would sit with its playhead at 0 and nothing
