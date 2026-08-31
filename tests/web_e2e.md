@@ -81,18 +81,24 @@ install):
   (`bash tests/ubc125_stack.sh` with `UBC125_AUDIO_CMD` set):
   1. Phase A — deterministic file: generates `/tmp/cap.webm` (60 s of tone
      from `ubc125 audio-tone` — the same muxer the Pi capture uses); stack
-     runs `python3 tests/paced_file.py /tmp/cap.webm 4` (paced replay —
-     raw `cat` outpaces the 48 KiB broadcast queue and the stream
-     backpressure-errors before playback).
+     runs `python3 tests/paced_file.py /tmp/cap.webm 4` (paced replay: a
+     bare `cat` dumps the file in one burst, and the 8-slot per-subscriber
+     queue would leave the browser with only the last chunks of a
+     generation it never played).
      audio defaults `off` (Play enabled, Stop disabled) → Play →
      `playing` → file ends → `reconnecting` → generation replays →
      `playing` again (late/reconnect clients get a fresh init) → Stop →
      `off`, capture process tree gone
   2. Phase B — continuous + throttled: stack runs `ubc125 audio-tone
      --loop --out -` (faster than real time); `emulateNetworkConditions`
-     64 KiB/s download → broadcast lag → stream error → `reconnecting`
-     observed (never `unavailable`) → unthrottle → `playing` → Stop, no
-     leftover tone process
+     64 KiB/s download. Since B5 the per-subscriber queue drops the oldest
+     chunks rather than ending the stream, so the checks are: `playing`
+     throughout (never `reconnecting`, never `unavailable`) **and** the
+     playhead keeps advancing inside the throttled window — a frozen
+     playhead under a `playing` label is the silent-freeze failure B8
+     exists to prevent (`gapSkip`; before it, a measured run froze at
+     t=9.29 s for 28 of 39 samples). Then unthrottle → `playing` → Stop,
+     no leftover tone process
   3. Phase C — late joiner (second browser): with tab 1 playing, tab 2
      joins the running generation (trusted CDP click so autoplay really
      starts the element) → `playing`; the playhead is the ground truth
@@ -107,6 +113,30 @@ install):
 
 ## Results
 
+- 2026-08-31 (Stop 1, real hardware): **manual phone field pass** — the Pi
+  behind `serve --device /dev/ttyACM0`, played from a mobile phone on Wi-Fi
+  and on cellular, switched mid-session. No delay build-up, no reconnect.
+  Evidence is the server's own counters, not a CDP run: 40 `audio stats`
+  windows over 195 s / two generations, 16.6–16.8 chunks/s at 60 ms mean
+  (0.9992× real time), `xruns=0`, `channel_stalls=0`, and no lagging
+  subscriber in any window — nothing was dropped. Not run on the Pi:
+  `web_latency_test.mjs` (`--no-stack`) lead percentiles, and the W5
+  scripted suite.
+- 2026-08-31 (Stop 1 buffering review): audio **24/24 pass** — phase B
+  gained the playhead-advance check that proves B5 (drop-oldest) and B8
+  (gap skip) work together; pointer **26/26**, hiccup/phone **10/10**.
+  Server side: cluster 60 ms, 8-slot per-subscriber queues, `Lagged` no
+  longer ends a `Listen` stream.
+- 2026-08-31 (`web_latency_test.mjs`, §6.2, new): **3/3 pass** on the fake
+  stack (16–24 s runs, middle half at 64 KiB/s) — worst playhead stall 0 ms,
+  no `reconnecting`, 100 % samples playing, `ranges max=1`, `catchups=30`
+  live-edge jumps, `gapSkips=1`. Lead percentiles (p50 ~72 s, p99 ~157 s) are
+  reported but not asserted: the looping tone fixture appends ~250× faster
+  than playback, so those numbers say nothing about the Pi. They are asserted
+  there with `--no-stack --max-lead-p99 0.6`.
+  The same harness caught a regression introduced during this review: a
+  remove()-based ahead-side cap froze the playhead for 19.7 s and destroyed
+  the SourceBuffer (silent audio, "playing" label); 0 ms stalls with it gone.
 - 2026-08-16: W5 pointer path **23/23 pass** at 1280×720; offline banner
   + 390×844 checks **10/10 pass**.
 - 2026-08-16 (UI review fixes): W5 pointer path **26/26 pass** (test made
