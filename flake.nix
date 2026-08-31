@@ -133,6 +133,18 @@
               default = false;
               description = "Enable the experimental squelch de-clicker on the audio pipeline (a 1000 ms floor-anchored close fade and a 20 ms onset fade).";
             };
+
+            audioClusterMs = lib.mkOption {
+              type = lib.types.int;
+              default = 60;
+              description = "WebM cluster duration in milliseconds for the audio pipeline (cluster/20 Opus frames per cluster). Lower means less buffering latency; accepted range 20..=1000.";
+            };
+
+            audioSubscriberQueue = lib.mkOption {
+              type = lib.types.int;
+              default = 8;
+              description = "Per-Listen-subscriber bounded queue depth in chunks; drop-oldest when full. Accepted range 1..=256.";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -151,7 +163,9 @@
                 ExecStart = "${cfg.package}/bin/ubc125 serve --server-addr ${cfg.listenAddress}"
                   + lib.optionalString (cfg.device != "") " --device ${cfg.device}"
                   + lib.optionalString (cfg.audioDevice != "") " --audio-device ${cfg.audioDevice}"
-                  + lib.optionalString cfg.declick " --declick";
+                  + lib.optionalString cfg.declick " --declick"
+                  + " --audio-cluster-ms ${toString cfg.audioClusterMs}"
+                  + " --audio-subscriber-queue ${toString cfg.audioSubscriberQueue}";
                 # If the scanner is not (yet) connected, serve exits with an
                 # error and systemd retries every 10 s until it appears.
                 Restart = "on-failure";
