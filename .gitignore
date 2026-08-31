@@ -4,4 +4,4 @@ result
 context.md
 target
 
-test-audio/*.wav
+test-audio/**/*.wav
