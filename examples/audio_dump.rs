@@ -22,9 +22,10 @@
 //!
 //! Each stream is checked independently: every media chunk is one complete
 //! WebM cluster whose absolute timecode must continue where the previous
-//! cluster ended (200 ms steps). A repeated section shows up as an
-//! overlap; a lost section as a gap; a replayed start as a late stream
-//! whose first timecode is back at 0.
+//! cluster ended (60 ms steps by default; `--audio-cluster-ms` on the
+//! server changes the step). A repeated section shows up as an overlap;
+//! a lost section as a gap; a replayed start as a late stream whose first
+//! timecode is back at 0.
 //!
 //! The decoded WAVs are what the browser would play: `aplay {prefix}_s0.wav`
 //! (48 kHz mono) or `ffplay {prefix}_s0.webm`.
@@ -311,6 +312,9 @@ async fn dump_stream(
     };
     let mut seen: HashSet<u64> = HashSet::new();
     let mut pre_skip = OPUS_PRE_SKIP;
+    // Accumulated cluster duration for the play-mode progress marker
+    // (cluster size is a server flag, so count the real durations).
+    let mut elapsed_audio_ms: u64 = 0;
     // True once the live-play sink's pipe is gone (e.g. `paplay` exited);
     // stops retrying a dead pipe instead of writing until the deadline.
     let mut sink_broken = false;
@@ -410,10 +414,11 @@ async fn dump_stream(
                 break;
             }
             if res.n_media % 25 == 0 {
-                eprintln!("stream {name}: t={}s", res.n_media * 200 / 1000);
+                eprintln!("stream {name}: t={}s", elapsed_audio_ms / 1000);
             }
         }
-        let dur = cluster_duration_ms(&chunk.payload).unwrap_or(200);
+        let dur = cluster_duration_ms(&chunk.payload).unwrap_or(60);
+        elapsed_audio_ms += dur;
         res.last_end_ms = Some(tc + dur as i64);
     }
     if let Some(w) = webm.as_mut()

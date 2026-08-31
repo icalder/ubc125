@@ -65,6 +65,52 @@ impl fmt::Display for WebmError {
 
 impl Error for WebmError {}
 
+/// Duration in ms of one complete WebM cluster: the span of its
+/// `SimpleBlock` relative timecodes plus one frame (the muxer's blocks
+/// carry a 2-byte big-endian relative timecode, `src/audio/webm_mux.rs`
+/// `add_block`). Used by the pump's B10 counters; returns `None` when the
+/// bytes are not a single parseable cluster with at least one block.
+pub fn cluster_duration_ms(bytes: &[u8]) -> Option<u64> {
+    const FRAME_MS: u64 = 20;
+    let (id, id_len) = read_vint_id(bytes).ok()??;
+    if id != CLUSTER_ID {
+        return None;
+    }
+    let (size, size_len) = read_vint_size(&bytes[id_len..]).ok()??;
+    let size = size? as usize;
+    let body = bytes.get(id_len + size_len..)?.get(..size)?;
+    // First child must be the mandatory Timecode; its value is skipped —
+    // the duration comes from the blocks' relative timecodes.
+    let (id, id_len) = read_vint_id(body).ok()??;
+    if id != 0xE7 {
+        return None;
+    }
+    let (size, size_len) = read_vint_size(&body[id_len..]).ok()??;
+    let body = body.get(id_len + size_len + size? as usize..)?;
+    let mut first_rel: Option<u16> = None;
+    let mut last_rel: Option<u16> = None;
+    let mut rest = body;
+    while !rest.is_empty() {
+        let (id, id_len) = read_vint_id(rest).ok()??;
+        if id != 0xA3 {
+            return None;
+        }
+        let (size, size_len) = read_vint_size(&rest[id_len..]).ok()??;
+        let block = rest.get(id_len + size_len..)?.get(..size? as usize)?;
+        rest = &rest[id_len + size_len + size? as usize..];
+        // Block data: track vint + 2-byte BE relative timecode + flags +
+        // payload (the muxer's fixed layout; track 1 encodes as 0x81).
+        if block.len() < 4 || block[0] != 0x81 {
+            return None;
+        }
+        let rel = u16::from_be_bytes([block[1], block[2]]);
+        first_rel.get_or_insert(rel);
+        last_rel = Some(rel);
+    }
+    let (first_rel, last_rel) = (first_rel?, last_rel?);
+    Some(u64::from(last_rel - first_rel) + FRAME_MS)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum State {
     AwaitingEbml,
@@ -539,6 +585,32 @@ pub(crate) mod fixtures {
 mod tests {
     use super::*;
     use crate::audio::webm::fixtures::*;
+    use crate::audio::webm_mux::{OPUS_FRAME_MS, WebmMuxer};
+
+    /// B10: the pump's duration counter must read a cluster's own blocks.
+    /// 50 frames at the 60 ms default: 16 full clusters (60 ms) + a
+    /// flushed 2-frame tail (40 ms).
+    #[test]
+    fn cluster_duration_reads_the_muxers_own_blocks() {
+        let mut muxer = WebmMuxer::default();
+        let mut clusters = Vec::new();
+        for frame in 0..50u64 {
+            let packet = [0xAB; 10];
+            clusters.extend(muxer.add_block(frame * OPUS_FRAME_MS, &packet));
+        }
+        clusters.push(muxer.flush().unwrap());
+        for (i, cluster) in clusters.iter().enumerate() {
+            let expected = if i + 1 < clusters.len() { 60 } else { 40 };
+            assert_eq!(
+                cluster_duration_ms(cluster),
+                Some(expected),
+                "cluster {i} duration"
+            );
+        }
+        // A non-cluster element is not a duration.
+        assert_eq!(cluster_duration_ms(&[0x18, 0x53, 0x80, 0x67, 0x01]), None);
+    }
+
     #[test]
     fn void_element_between_seekhead_and_info_is_skipped() {
         let mut stream = Vec::new();

@@ -12,10 +12,13 @@ pub mod filter;
 pub mod native;
 pub mod opusenc;
 pub mod source;
+pub mod stats;
 pub mod webm;
 pub mod webm_mux;
 
-pub use broadcaster::{AudioBroadcaster, AudioError, AudioEvent, AudioSubscription};
+pub use broadcaster::{
+    AudioBroadcaster, AudioError, AudioEvent, AudioSubscription, DEFAULT_SUBSCRIBER_QUEUE,
+};
 pub use clickfilter::InPlaceDeClick;
 pub use native::{AlsaOpusSource, ToneSource};
 pub use source::{CaptureSource, CommandSource, DEFAULT_AUDIO_DEVICE};

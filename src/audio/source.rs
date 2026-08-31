@@ -37,8 +37,10 @@ use tracing::warn;
 /// Default ALSA device for the scanner line-in (USB mic on the Pi).
 pub const DEFAULT_AUDIO_DEVICE: &str = "hw:2";
 
-/// Capacity of the source event channel.
-pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 64;
+/// Capacity of the source event channel (B5: 16 ≈ 1 s of 60 ms clusters;
+/// a full channel blocks the capture task into an ALSA xrun, which is the
+/// drop-not-buffer policy in action — 64 held up to ~13 s of stale audio).
+pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 16;
 /// Bytes of stderr retained for diagnostics.
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
 /// Stdout read buffer size.

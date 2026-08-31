@@ -13,7 +13,7 @@
 
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -21,10 +21,15 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::audio::source::{CaptureSource, SourceError, SourceEvent, SourceExit, StopHandle};
-use crate::audio::webm::{DEFAULT_MAX_SEGMENT_SIZE, Segment, WebmSegmenter};
+use crate::audio::stats::SharedAudioStats;
+use crate::audio::webm::{
+    cluster_duration_ms, DEFAULT_MAX_SEGMENT_SIZE, Segment, WebmSegmenter,
+};
 
-/// Broadcast channel capacity per generation.
-const BROADCAST_CAPACITY: usize = 64;
+/// B5: default max chunks one subscriber may buffer ahead of the pump
+/// before the oldest are dropped (8 × 60 ms ≈ 480 ms ceiling; was 64 ×
+/// 200 ms ≈ 12.8 s). `--audio-subscriber-queue`.
+pub const DEFAULT_SUBSCRIBER_QUEUE: usize = 8;
 /// Grace window between the last subscriber leaving and the child being
 /// killed; a subscriber joining inside it cancels the stop.
 const STOP_JOIN_GRACE: Duration = Duration::from_millis(100);
@@ -112,6 +117,12 @@ struct Inner {
     create: tokio::sync::Mutex<()>,
     state: StdMutex<State>,
     next_id: AtomicU64,
+    /// B10 pipeline counters, shared with the capture source (xruns, source
+    /// channel stalls) and the 5-second reporter.
+    stats: SharedAudioStats,
+    /// B5: per-subscriber broadcast capacity (`--audio-subscriber-queue`),
+    /// read when each generation starts.
+    subscriber_queue: AtomicUsize,
 }
 
 impl Inner {
@@ -132,8 +143,17 @@ pub struct AudioBroadcaster {
 
 impl AudioBroadcaster {
     /// `source` is started lazily on the first subscriber and restarted for
-    /// every new generation.
+    /// every new generation. Tests get their counters here; production shares
+    /// one handle with the capture source via [`Self::with_stats`].
+    #[cfg(test)]
     pub fn new(source: Arc<dyn CaptureSource>) -> Self {
+        Self::with_stats(source, std::sync::Arc::new(crate::audio::stats::AudioStats::new()))
+    }
+
+    /// Create a broadcaster whose pipeline counters live in `stats` (the
+    /// serve command passes the same handle to the capture source so the
+    /// xrun / channel-stall counters land in one place).
+    pub fn with_stats(source: Arc<dyn CaptureSource>, stats: SharedAudioStats) -> Self {
         Self {
             inner: Arc::new(Inner {
                 source,
@@ -144,7 +164,64 @@ impl AudioBroadcaster {
                     generation: None,
                 }),
                 next_id: AtomicU64::new(1),
+                stats,
+                subscriber_queue: AtomicUsize::new(DEFAULT_SUBSCRIBER_QUEUE),
             }),
+        }
+    }
+
+    /// B5: set the per-subscriber broadcast capacity (call before the first
+    /// subscriber; the capacity is read when each generation starts).
+    pub fn with_subscriber_queue(self, capacity: usize) -> Self {
+        self.inner
+            .subscriber_queue
+            .store(capacity.max(1), Ordering::Relaxed);
+        self
+    }
+
+    /// The pipeline's B10 counters (shared with the capture source).
+    pub fn stats(&self) -> SharedAudioStats {
+        Arc::clone(&self.inner.stats)
+    }
+
+    /// B10: register a gRPC listener with the shared stats; the returned
+    /// id is used to record its `Lagged` drops and its removal when the
+    /// stream ends.
+    pub fn register_subscriber(&self) -> u64 {
+        self.inner.stats.subscriber_started()
+    }
+
+    /// Wait (up to `deadline`) for `gen_id`'s init segment to be cached,
+    /// returning a copy.
+    ///
+    /// The first subscriber's `cached_init` is `None` at `subscribe()` time:
+    /// the pump caches the init a moment later, after the source emits its
+    /// header. The one-time `Init` channel event cannot be the fallback — a
+    /// fast source can drop it out of the bounded channel before a slow
+    /// client's receiver reads it, leaving that client without an init and
+    /// stuck in "connecting". Fetching the init from the cache is reliable:
+    /// the pump caches it before it sends any media, so by the time media is
+    /// flowing the cache is populated.
+    pub async fn wait_for_init(&self, gen_id: u64, deadline: Duration) -> Option<Vec<u8>> {
+        let end = Instant::now() + deadline;
+        loop {
+            let (init, gen_present) = {
+                let state = self.inner.state();
+                match state.generation.as_ref() {
+                    Some(a) if a.id == gen_id => (a.cached_init.clone(), true),
+                    _ => (None, false),
+                }
+            };
+            if let Some(init) = init {
+                return Some(init);
+            }
+            // The generation ended before producing an init (a broken
+            // source): stop waiting; the caller falls back to the channel,
+            // which will surface the failure.
+            if !gen_present || Instant::now() >= end {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 
@@ -258,7 +335,8 @@ impl AudioBroadcaster {
                 return Err(AudioError::Source(e));
             }
         };
-        let (sender, _initial_receiver) = broadcast::channel(BROADCAST_CAPACITY);
+        let (sender, _initial_receiver) =
+            broadcast::channel(self.inner.subscriber_queue.load(Ordering::Relaxed));
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let started_at = Instant::now();
         let stop = handle.stop_handle();
@@ -312,6 +390,11 @@ impl AudioSubscription {
     /// it started.
     pub fn cached_init(&self) -> Option<&[u8]> {
         self.cached_init.as_deref()
+    }
+
+    /// The id of the generation this subscription belongs to.
+    pub fn gen_id(&self) -> u64 {
+        self.gen_id
     }
 
     /// A fresh receiver bound to the generation's event channel, also
@@ -383,6 +466,17 @@ async fn run_generation(
                             AudioEvent::Init(bytes, elapsed_ms(started_at))
                         }
                         Segment::Media(bytes) => {
+                            // B10: count what the pump emits — chunk count
+                            // plus the cluster's own duration, read from its
+                            // blocks (0 when unparseable: the chunk still
+                            // counts, the duration sums skip it).
+                            let duration_ms = cluster_duration_ms(&bytes).unwrap_or(0);
+                            inner.stats.record_chunk(duration_ms);
+                            debug!(
+                                bytes = bytes.len(),
+                                cluster_ms = duration_ms,
+                                "audio chunk emitted"
+                            );
                             set_status(&inner, Some(gen_id), Status::Capturing);
                             AudioEvent::Media(bytes, elapsed_ms(started_at))
                         }
@@ -655,6 +749,48 @@ mod tests {
         drop(sub_c);
         // Two still listening: no stop yet.
         assert_eq!(source.stop_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn wait_for_init_returns_the_cached_init() {
+        // The first subscriber's `cached_init` is `None` at `subscribe()`
+        // time; the pump caches the init a moment later. `wait_for_init`
+        // must hand that cached copy back, identical to what a late joiner
+        // gets — this is the reliable path the gRPC `listen` uses instead of
+        // the lossy channel's one-time Init event.
+        let source = continuous_source(1);
+        let broadcaster = AudioBroadcaster::new(source.clone());
+        let sub = broadcaster.subscribe().await.expect("subscribe");
+        let gen_id = sub.gen_id();
+        let init = timeout(WAIT, broadcaster.wait_for_init(gen_id, Duration::from_secs(2)))
+            .await
+            .expect("wait_for_init must not hang")
+            .expect("init must be cached");
+        assert!(!init.is_empty(), "init must not be empty");
+        // Same bytes a late joiner is handed (the cached copy).
+        let late = broadcaster.subscribe().await.expect("late subscribe");
+        let late_init = late.cached_init().expect("late joiner has cached init").to_vec();
+        assert_eq!(init, late_init, "wait_for_init must return the cached init");
+        drop(late);
+        drop(sub);
+    }
+
+    #[tokio::test]
+    async fn wait_for_init_returns_none_when_source_ends_without_init() {
+        // A source that ends before emitting a header produces no init and
+        // ends the generation cleanly. `wait_for_init` must return `None`
+        // (not hang) so the caller falls back to the channel, which surfaces
+        // the failure — a hung first subscriber would strand the client in
+        // "connecting" forever.
+        let source = Arc::new(FakeSource::new(Vec::new()).finite());
+        let broadcaster = AudioBroadcaster::new(source.clone());
+        let sub = broadcaster.subscribe().await.expect("subscribe");
+        let gen_id = sub.gen_id();
+        let result = timeout(WAIT, broadcaster.wait_for_init(gen_id, Duration::from_secs(2)))
+            .await
+            .expect("wait_for_init must not hang");
+        assert!(result.is_none(), "no init was produced");
+        drop(sub);
     }
 
     #[tokio::test]

@@ -1,9 +1,12 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tonic::{Request, Response, Status};
 
-use crate::audio::{AudioBroadcaster, AudioError, AudioEvent, AudioSubscription};
+use crate::audio::{
+    stats::SharedAudioStats, AudioBroadcaster, AudioError, AudioEvent, AudioSubscription,
+};
 use crate::constants::NUM_BANKS;
 use crate::scanner::{ScannerClient, ScannerError};
 use crate::status::{StatusBroadcaster, StatusSubscription, StatusUpdate};
@@ -380,8 +383,19 @@ impl Stream for StatusStream {
     }
 }
 
+/// How long the first subscriber waits for the pump to cache the init
+/// segment before giving up and falling back to the channel. The init is
+/// produced within the first capture period (~20–80 ms); the bound covers a
+/// slow source start without masking a genuinely broken one for long.
+const INIT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Server-streaming response for `Listen`: the init chunk (cached or from
 /// the channel), then one chunk per WebM cluster until the generation ends.
+///
+/// B5: this client's broadcast receiver drops the oldest chunks when it
+/// cannot keep up (`Lagged`); the stream skips them instead of ending, so
+/// a slow client drops audio instead of cycling a full reconnect — the
+/// stream only ends when the generation itself ends.
 struct ListenStream {
     events: BroadcastStream<AudioEvent>,
     /// Init chunk owed to this client before any buffered/channel media.
@@ -392,6 +406,9 @@ struct ListenStream {
     /// Keeps the subscriber slot (and the capture) alive for the stream's
     /// lifetime; dropping the stream returns the slot to the broadcaster.
     _subscription: AudioSubscription,
+    /// B10: this listener's per-subscriber drop counters.
+    stats: SharedAudioStats,
+    subscriber_id: u64,
 }
 
 impl Stream for ListenStream {
@@ -429,10 +446,34 @@ impl Stream for ListenStream {
                 Poll::Ready(Some(Ok(AudioEvent::Failed))) => {
                     return Poll::Ready(Some(Err(Status::unavailable("audio capture ended"))));
                 }
-                Poll::Ready(Some(Err(_))) | Poll::Ready(None) => return Poll::Ready(None),
+                // B5: we fell behind (this client was slow): the broadcast
+                // channel already dropped the oldest `n` chunks. Skip to
+                // the next one instead of ending the stream — ending it
+                // would force a full reconnect (new init, new
+                // MediaSource) for what is only a momentary stall. The
+                // dropped audio is counted for the B10 reporter; the
+                // client's buffer gap makes it audible as a hiccup, not
+                // a restart.
+                Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n)))) => {
+                    self.stats.subscriber_dropped(self.subscriber_id, n);
+                    continue;
+                }
+                // The generation's channel closed: end the stream; the
+                // client reconnects and a fresh generation starts if none
+                // is running. (The only error variant is `Lagged`, handled
+                // above, so a closed channel is the only other outcome.)
+                Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,
             }
         }
+    }
+}
+
+impl Drop for ListenStream {
+    fn drop(&mut self) {
+        // B10: remove this listener's counters (the stream ended by any
+        // path: clean generation end, error, or client disconnect).
+        self.stats.subscriber_stopped(self.subscriber_id);
     }
 }
 
@@ -451,13 +492,30 @@ impl AudioService for AudioServer {
         // against a duplicate anyway.
         let (pending_init, skip_inits) = match subscription.cached_init() {
             Some(init) => (Some(init.to_vec()), true),
-            None => (None, false),
+            // First subscriber: its cached_init is None because the pump
+            // caches the init a moment after the source starts. Fetch it
+            // from the cache (reliable) instead of relying on the bounded
+            // channel to deliver the one-time Init event before a fast
+            // source drops it — a dropped init would strand this client in
+            // "connecting" with no MediaSource to start.
+            None => match self
+                .broadcaster
+                .wait_for_init(subscription.gen_id(), INIT_WAIT_TIMEOUT)
+                .await
+            {
+                Some(init) => (Some(init), true),
+                None => (None, false),
+            },
         };
+        let stats = self.broadcaster.stats();
+        let subscriber_id = self.broadcaster.register_subscriber();
         let stream = ListenStream {
             events: BroadcastStream::new(subscription.resubscribe()),
             pending_init,
             skip_inits,
             _subscription: subscription,
+            stats,
+            subscriber_id,
         };
         Ok(Response::new(Box::pin(stream)))
     }
@@ -844,6 +902,81 @@ mod tests {
         drop(sub);
         assert!(chunks[0].init_segment, "cached init comes first");
         assert!(!chunks[1].init_segment, "no duplicated init on the channel");
+    }
+
+    #[tokio::test]
+    async fn listen_first_subscriber_gets_init_when_channel_drops_it() {
+        // B1+B5 regression: a fast, bursty source drops the one-time Init
+        // channel event out of the bounded (8-slot) subscriber channel
+        // before the first subscriber's receiver — created after
+        // wait_for_init — can read it. That subscriber must still get the
+        // init, from the cache (reliable) rather than the lossy channel, or
+        // it is stranded in "connecting" with no MediaSource to start.
+        // Without the fix, the first chunk would be a Media (init_segment
+        // false) because the channel Init was overwritten.
+        let (stream, init) = build_fixture(100);
+        // delay = 0 (FakeSource default): the pump emits all clusters as
+        // fast as it can, so the Init is long gone from the 8-slot channel
+        // by the time the receiver is created.
+        let source = Arc::new(FakeSource::new(stream).with_head(init.len()));
+        let broadcaster = Arc::new(AudioBroadcaster::new(source.clone()));
+        let server = AudioServer::new(broadcaster);
+        let chunks = listen_first_chunks(&server, 3).await;
+        assert!(
+            chunks[0].init_segment,
+            "first chunk must be the init segment (from the cache, not the dropped channel event)"
+        );
+        assert!(!chunks[1].init_segment, "no duplicated init");
+        assert!(!chunks[2].init_segment);
+    }
+
+    #[tokio::test]
+    async fn listen_survives_lagging_and_counts_the_dropped_chunks() {
+        // B5/R1: a subscriber that cannot keep up has its oldest chunks
+        // dropped by the broadcast channel. The stream must stay alive and
+        // resume at the newest chunks (the pre-B5 code ended it, forcing a
+        // full reconnect for a momentary stall), and every drop must be
+        // counted for that subscriber (B10).
+        let (stream_bytes, init) = build_fixture(40);
+        // Looping and unpaced: it outruns an unpolled subscriber by far more
+        // than the 8-slot queue within a few hundred ms.
+        let source = Arc::new(FakeSource::new(stream_bytes).with_head(init.len()));
+        let broadcaster = Arc::new(AudioBroadcaster::new(source.clone()));
+        let stats = broadcaster.stats();
+        let server = AudioServer::new(broadcaster.clone());
+        let mut listen = server
+            .listen(Request::new(SubscribeAudioRequest {}))
+            .await
+            .expect("listen must succeed")
+            .into_inner();
+        let first = timeout(WAIT_AUDIO, listen.next())
+            .await
+            .expect("timed out waiting for the init chunk")
+            .expect("stream ended early")
+            .expect("init chunk error");
+        assert!(first.init_segment, "init comes first");
+        // Sit on the stream while the source floods past this subscriber.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let resumed = timeout(WAIT_AUDIO, listen.next())
+            .await
+            .expect("Lagged must not end the stream")
+            .expect("stream ended instead of skipping to the newest chunks")
+            .expect("chunk error");
+        assert!(!resumed.init_segment, "media resumes after the lag");
+        let drops: u64 = stats
+            .snapshot()
+            .subscribers
+            .iter()
+            .map(|(_, s)| s.lag_drops)
+            .sum();
+        assert!(drops > 0, "Lagged drops must be counted per subscriber");
+        // The counters must not outlive the stream (no per-listener leak).
+        drop(listen);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            stats.snapshot().subscribers.is_empty(),
+            "a listener's counters must be removed when its stream ends"
+        );
     }
 
     #[tokio::test]

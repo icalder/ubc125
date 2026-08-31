@@ -11,11 +11,11 @@
 //! (no ALSA); it is the `audio-tone` subcommand's engine and the
 //! hardware-free test source.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, atomic::Ordering};
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::audio::alsacapture::{AlsaReader, FrameSplitter, PcmEvent, PcmReader, PERIOD_FRAMES};
 use crate::audio::filter::PcmFrameFilter;
@@ -24,7 +24,8 @@ use crate::audio::source::{
     CaptureHandle, CaptureSource, HandleStop, SourceError, SourceEvent, SourceExit,
     EVENT_CHANNEL_CAPACITY,
 };
-use crate::audio::webm_mux::{DEFAULT_BITRATE_BPS, OPUS_FRAME_MS, WebmMuxer};
+use crate::audio::stats::SharedAudioStats;
+use crate::audio::webm_mux::{DEFAULT_BITRATE_BPS, DEFAULT_CLUSTER_TIME_MS, OPUS_FRAME_MS, WebmMuxer};
 
 /// One 20 ms frame's worth of samples to request per ALSA read. The device
 /// period is 960 frames; asking for two periods makes partial reads and
@@ -32,6 +33,27 @@ use crate::audio::webm_mux::{DEFAULT_BITRATE_BPS, OPUS_FRAME_MS, WebmMuxer};
 const READ_BUF_FRAMES: usize = (PERIOD_FRAMES * 2) as usize;
 /// Sine amplitude for the tone sources (0.5 full scale).
 const TONE_AMPLITUDE: f64 = 0.5;
+/// B10: a source-channel block longer than one frame (20 ms) means the
+/// pump fell behind the capture — counted as a channel stall.
+const CHANNEL_STALL_MS: u64 = 20;
+
+/// Capture pipeline configuration (B1/B3; the serve command's audio flags).
+#[derive(Debug, Clone, Copy)]
+pub struct AudioPipelineConfig {
+    /// WebM cluster duration in ms (B1, `--audio-cluster-ms`).
+    pub cluster_ms: u64,
+    /// Opus encoder bitrate in bits/s (`audio-tone`'s `--bitrate`).
+    pub bitrate_bps: u32,
+}
+
+impl Default for AudioPipelineConfig {
+    fn default() -> Self {
+        Self {
+            cluster_ms: DEFAULT_CLUSTER_TIME_MS,
+            bitrate_bps: DEFAULT_BITRATE_BPS,
+        }
+    }
+}
 
 /// Composes the encoder and muxer for one capture: every 960-sample frame
 /// becomes exactly one Opus packet in exactly one SimpleBlock, with
@@ -43,11 +65,11 @@ struct WebmOpusPipeline {
 }
 
 impl WebmOpusPipeline {
-    fn new(bitrate_bps: u32) -> Result<Self, String> {
+    fn new(config: &AudioPipelineConfig) -> Result<Self, String> {
         Ok(Self {
-            encoder: OpusFrameEncoder::with_bitrate(bitrate_bps)
+            encoder: OpusFrameEncoder::with_bitrate(config.bitrate_bps)
                 .map_err(|e| format!("opus encoder: {e}"))?,
-            muxer: WebmMuxer::new(),
+            muxer: WebmMuxer::with_cluster_time(config.cluster_ms),
             frame_index: 0,
         })
     }
@@ -74,6 +96,8 @@ impl WebmOpusPipeline {
 pub struct AlsaOpusSource {
     device: String,
     filter: Option<Arc<dyn PcmFrameFilter>>,
+    config: AudioPipelineConfig,
+    stats: SharedAudioStats,
 }
 
 impl std::fmt::Debug for AlsaOpusSource {
@@ -81,6 +105,7 @@ impl std::fmt::Debug for AlsaOpusSource {
         f.debug_struct("AlsaOpusSource")
             .field("device", &self.device)
             .field("filter", &self.filter.as_ref().map(|_| "present"))
+            .field("config", &self.config)
             .finish()
     }
 }
@@ -91,6 +116,8 @@ impl AlsaOpusSource {
         Self {
             device: device.into(),
             filter: None,
+            config: AudioPipelineConfig::default(),
+            stats: Arc::new(crate::audio::stats::AudioStats::new()),
         }
     }
 
@@ -99,6 +126,19 @@ impl AlsaOpusSource {
     /// generation ([`PcmFrameFilter::for_capture`]).
     pub fn with_filter(mut self, filter: Arc<dyn PcmFrameFilter>) -> Self {
         self.filter = Some(filter);
+        self
+    }
+
+    /// B1: WebM cluster duration in ms (`--audio-cluster-ms`).
+    pub fn with_cluster_time(mut self, cluster_ms: u64) -> Self {
+        self.config.cluster_ms = cluster_ms;
+        self
+    }
+
+    /// B10: record xrun / channel-stall counters into the broadcaster's
+    /// shared stats (the serve command passes `broadcaster.stats()`).
+    pub fn with_stats(mut self, stats: SharedAudioStats) -> Self {
+        self.stats = stats;
         self
     }
 }
@@ -123,8 +163,10 @@ impl CaptureSource for AlsaOpusSource {
             let cancel = stop.cancel.subscribe();
             let task_stop = std::sync::Arc::clone(&stop);
             let filter = self.filter.as_ref().map(|f| f.for_capture());
+            let config = self.config;
+            let stats = Arc::clone(&self.stats);
             tokio::task::spawn_blocking(move || {
-                run_reader_capture(reader, tx, task_stop, cancel, filter);
+                run_reader_capture(reader, tx, task_stop, cancel, filter, config, stats);
             });
             Ok(CaptureHandle { rx, stop })
         })
@@ -190,8 +232,12 @@ impl CaptureSource for ToneSource {
             let cancel = stop.cancel.subscribe();
             let task_stop = std::sync::Arc::clone(&stop);
             let filter = self.filter.as_ref().map(|f| f.for_capture());
+            let config = AudioPipelineConfig {
+                bitrate_bps: bitrate,
+                ..AudioPipelineConfig::default()
+            };
             tokio::task::spawn_blocking(move || {
-                run_tone_capture(tx, task_stop, cancel, freq, duration, bitrate, filter);
+                run_tone_capture(tx, task_stop, cancel, freq, duration, config, filter);
             });
             Ok(CaptureHandle { rx, stop })
         })
@@ -202,6 +248,25 @@ impl CaptureSource for ToneSource {
 /// the caller must then release resources and mark the task exited.
 fn send_bytes(tx: &mpsc::Sender<SourceEvent>, bytes: Vec<u8>) -> bool {
     tx.blocking_send(SourceEvent::Bytes(bytes)).is_ok()
+}
+
+/// As [`send_bytes`], but counts a block longer than one frame (B10:
+/// the pump is falling behind; at the ALSA device this becomes an xrun).
+fn send_bytes_tracked(
+    stats: &SharedAudioStats,
+    tx: &mpsc::Sender<SourceEvent>,
+    bytes: Vec<u8>,
+) -> bool {
+    let started = Instant::now();
+    let ok = send_bytes(tx, bytes);
+    if ok && started.elapsed() > Duration::from_millis(CHANNEL_STALL_MS) {
+        stats.channel_stalls.fetch_add(1, Ordering::Relaxed);
+        debug!(
+            block_ms = started.elapsed().as_millis(),
+            "source channel blocked the capture task"
+        );
+    }
+    ok
 }
 
 fn finish(tx: &mpsc::Sender<SourceEvent>, stop: &HandleStop, exit: SourceExit) {
@@ -218,8 +283,10 @@ fn run_reader_capture<R: PcmReader>(
     stop: std::sync::Arc<HandleStop>,
     mut cancel: watch::Receiver<bool>,
     mut filter: Option<Box<dyn PcmFrameFilter>>,
+    config: AudioPipelineConfig,
+    stats: SharedAudioStats,
 ) {
-    let mut pipeline = match WebmOpusPipeline::new(DEFAULT_BITRATE_BPS) {
+    let mut pipeline = match WebmOpusPipeline::new(&config) {
         Ok(p) => p,
         Err(e) => {
             let _ = reader.close();
@@ -250,7 +317,7 @@ fn run_reader_capture<R: PcmReader>(
                         return;
                     };
                     for cluster in closed {
-                        if !send_bytes(&tx, cluster) {
+                        if !send_bytes_tracked(&stats, &tx, cluster) {
                             // Reader (generation pump) is gone; release the
                             // device and exit quietly.
                             let _ = reader.close();
@@ -261,6 +328,9 @@ fn run_reader_capture<R: PcmReader>(
                 }
             }
             Ok(PcmEvent::Xrun) => {
+                // B10: xruns are the drop-not-buffer policy at the device;
+                // the 5-second reporter watches this counter (B2).
+                stats.xruns.fetch_add(1, Ordering::Relaxed);
                 warn!("audio capture xrun; dropping torn frame");
                 splitter.reset();
             }
@@ -285,7 +355,7 @@ fn run_reader_capture<R: PcmReader>(
                 return;
             };
             for cluster in closed {
-                if !send_bytes(&tx, cluster) {
+                if !send_bytes_tracked(&stats, &tx, cluster) {
                     let _ = reader.close();
                     stop.mark_exited();
                     return;
@@ -308,10 +378,10 @@ fn run_tone_capture(
     mut cancel: watch::Receiver<bool>,
     freq: f64,
     duration: Duration,
-    bitrate_bps: u32,
+    config: AudioPipelineConfig,
     mut filter: Option<Box<dyn PcmFrameFilter>>,
 ) {
-    let mut pipeline = match WebmOpusPipeline::new(bitrate_bps) {
+    let mut pipeline = match WebmOpusPipeline::new(&config) {
         Ok(p) => p,
         Err(e) => {
             finish(&tx, &stop, SourceExit::Failed(e));
@@ -465,7 +535,17 @@ mod tests {
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let cancel = stop.cancel.subscribe();
         let task_stop = Arc::clone(&stop);
-        tokio::task::spawn_blocking(move || run_reader_capture(reader, tx, task_stop, cancel, None));
+        tokio::task::spawn_blocking(move || {
+            run_reader_capture(
+                reader,
+                tx,
+                task_stop,
+                cancel,
+                None,
+                AudioPipelineConfig::default(),
+                Arc::new(crate::audio::stats::AudioStats::new()),
+            )
+        });
         (CaptureHandle { rx, stop }, close_count)
     }
 
@@ -501,7 +581,17 @@ mod tests {
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let cancel = stop.cancel.subscribe();
         let task_stop = Arc::clone(&stop);
-        tokio::task::spawn_blocking(move || run_reader_capture(reader, tx, task_stop, cancel, filter));
+        tokio::task::spawn_blocking(move || {
+            run_reader_capture(
+                reader,
+                tx,
+                task_stop,
+                cancel,
+                filter,
+                AudioPipelineConfig::default(),
+                Arc::new(crate::audio::stats::AudioStats::new()),
+            )
+        });
         let mut events = rx;
         let mut bytes = Vec::new();
         let mut exit = None;
@@ -542,9 +632,9 @@ mod tests {
     /// The de-clicker's steady-state flush holds the 984-sample delay line
     /// and emits it as [960, 24]: the ragged 24-sample chunk must be
     /// zero-padded at the seam and encoded, not rejected. 30 input frames
-    /// therefore become 32 encoded frames — four clusters at 0/200/400/600 ms
-    /// (the unfiltered run closes exactly three, at 0/200/400) — and the
-    /// capture still ends `Clean`.
+    /// therefore become 32 encoded frames — eleven 60 ms clusters at
+    /// 0/60/…/600 ms (the unfiltered run closes exactly ten, at 0/60/…/540)
+    /// — and the capture still ends `Clean`.
     #[tokio::test]
     async fn declick_ragged_flush_is_padded_at_the_seam() {
         use crate::audio::clickfilter::config::Config;
@@ -578,8 +668,8 @@ mod tests {
             .collect();
         assert_eq!(
             timecodes,
-            vec![0, 200, 400, 600],
-            "30 input frames + 2 flush frames (984 held) = 32 blocks in four clusters"
+            (0..11).map(|i| i * 60).collect::<Vec<_>>(),
+            "30 input frames + 2 flush frames (984 held) = 32 blocks in eleven 60 ms clusters"
         );
         // Control: the unfiltered run encodes exactly the 30 read frames.
         let (unfiltered, exit) = run_reader_bytes_with_exit(None).await;
@@ -598,7 +688,7 @@ mod tests {
                 parse_cluster_timecode(bytes)
             })
             .collect();
-        assert_eq!(timecodes, vec![0, 200, 400]);
+        assert_eq!(timecodes, (0..10).map(|i| i * 60).collect::<Vec<_>>());
     }
 
     /// G13: the fake-reader pipeline composes correctly — init before any
@@ -628,7 +718,7 @@ mod tests {
             segments[1..].iter().all(|s| matches!(s, Segment::Media(_))),
             "only clusters after init"
         );
-        // Cluster timecodes step by 200 ms (10 blocks of 20 ms).
+        // Cluster timecodes step by 60 ms (3 blocks of 20 ms).
         let timecodes: Vec<u64> = segments[1..]
             .iter()
             .map(|s| {
@@ -640,8 +730,8 @@ mod tests {
             .collect();
         assert_eq!(
             timecodes,
-            (0..timecodes.len() as u64).map(|i| i * 200).collect::<Vec<_>>(),
-            "cluster timecodes 0, 200, 400, ..."
+            (0..timecodes.len() as u64).map(|i| i * 60).collect::<Vec<_>>(),
+            "cluster timecodes 0, 60, 120, ..."
         );
         timeout(WAIT, stop.stop()).await.expect("stop timed out");
         assert_eq!(
@@ -726,7 +816,7 @@ mod tests {
     #[tokio::test]
     async fn tone_source_through_broadcaster() {
         use crate::audio::broadcaster::{AudioBroadcaster, AudioEvent, Status};
-        // 600 ms of tone = 30 frames = exactly 3 clusters.
+        // 600 ms of tone = 30 frames = exactly 10 clusters of 60 ms.
         let source = Arc::new(ToneSource::new(
             440.0,
             Duration::from_millis(600),
@@ -747,7 +837,7 @@ mod tests {
                 Ok(AudioEvent::Init(_, _)) => got_init = true,
                 Ok(AudioEvent::Media(_, _)) => {
                     clusters += 1;
-                    if clusters >= 3 {
+                    if clusters >= 10 {
                         break;
                     }
                 }
@@ -756,7 +846,10 @@ mod tests {
             }
         }
         assert!(got_init, "init must arrive first");
-        assert_eq!(clusters, 3, "600 ms of audio is exactly 3 clusters");
+        assert_eq!(
+            clusters, 10,
+            "600 ms of audio is exactly 10 clusters of 60 ms"
+        );
         drop(sub);
         // Wait for the first generation to fully end before resubscribing.
         // Otherwise the resubscribe can race the pump's termination cleanup
@@ -826,7 +919,7 @@ mod tests {
     }
 
     /// Replaced `real_ffmpeg_sine_smoke` (Phase 5): `ToneSource` → segmenter
-    /// yields 3 complete clusters for 600 ms of tone.
+    /// yields 10 complete 60 ms clusters for 600 ms of tone.
     #[tokio::test]
     async fn tone_source_smoke() {
         let source = ToneSource::new(
@@ -849,7 +942,7 @@ mod tests {
                 None => panic!("channel closed"),
             }
         }
-        assert_eq!(segments.len(), 4, "init + 3 clusters");
+        assert_eq!(segments.len(), 11, "init + 10 clusters of 60 ms");
         assert!(matches!(segments[0], Segment::Init(_)));
         assert!(segments[1..].iter().all(|s| matches!(s, Segment::Media(_))));
     }

@@ -25,9 +25,11 @@
 pub const OPUS_SAMPLE_RATE: u32 = 48_000;
 /// Timecode in milliseconds for one Opus frame.
 pub const OPUS_FRAME_MS: u64 = 20;
-/// Close a cluster after this much audio (matches the old ffmpeg
-/// `-cluster_time_limit 200`).
-const MAX_CLUSTER_TIME_MS: u64 = 200;
+/// Default: close a cluster after this much audio (B1). 60 ms is three
+/// 20 ms Opus frames — small enough to keep the whole pipeline under the
+/// 150 ms target, large enough that the ~11-byte cluster header costs
+/// ~0.2 kbps on a 24 kbps stream.
+pub const DEFAULT_CLUSTER_TIME_MS: u64 = 60;
 /// Close a cluster after this many payload bytes (matches
 /// `DEFAULT_MAX_SEGMENT_SIZE`, so the segmenter's oversized check can
 /// never fire on our own output).
@@ -67,7 +69,7 @@ const FLAG_KEYFRAME: u8 = 0x80;
 
 /// Muxes Opus packets into WebM: one init segment plus cluster-sized media
 /// segments.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WebmMuxer {
     /// Payload of the cluster under construction (SimpleBlocks).
     cluster: Vec<u8>,
@@ -75,12 +77,26 @@ pub struct WebmMuxer {
     cluster_open: bool,
     /// Absolute timecode (ms) of the first block in the open cluster.
     cluster_start_ms: u64,
+    /// Close a cluster after this much audio (B1; `--audio-cluster-ms`).
+    max_cluster_time_ms: u64,
+}
+
+impl Default for WebmMuxer {
+    fn default() -> Self {
+        Self::with_cluster_time(DEFAULT_CLUSTER_TIME_MS)
+    }
 }
 
 impl WebmMuxer {
-    /// Create an empty muxer.
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a muxer closing clusters after `cluster_time_ms` of audio.
+    /// ([`Default`] uses [`DEFAULT_CLUSTER_TIME_MS`].)
+    pub fn with_cluster_time(cluster_time_ms: u64) -> Self {
+        Self {
+            cluster: Vec::new(),
+            cluster_open: false,
+            cluster_start_ms: 0,
+            max_cluster_time_ms: cluster_time_ms,
+        }
     }
 
     /// The init segment: EBML header + open (unknown-size) `Segment` +
@@ -115,7 +131,7 @@ impl WebmMuxer {
         let block_len = 1 + size.len() + data_len;
         let mut closed = Vec::new();
         let rel = timecode_ms.saturating_sub(self.cluster_start_ms);
-        let over_time = self.cluster_open && rel >= MAX_CLUSTER_TIME_MS;
+        let over_time = self.cluster_open && rel >= self.max_cluster_time_ms;
         let over_bytes = self.cluster_open && self.cluster.len() + block_len > MAX_CLUSTER_BYTES;
         if over_time || over_bytes {
             closed.push(self.close_cluster());
@@ -323,19 +339,21 @@ mod tests {
 
     /// G1: muxer output fed to the existing segmenter (one-shot) yields
     /// exactly one `Init` then N `Media`, byte-identical, for 1 s, 60 s, and
-    /// a forced-flush-at-end shape.
+    /// a forced-flush-at-end shape. At the 60 ms default a cluster holds
+    /// 3 frames, so 50 frames close 17 clusters (16 full + a flushed
+    /// 2-frame tail), 3000 frames close 1000, and 7 frames close 3.
     #[test]
     fn round_trip_through_segmenter() {
-        for (n_frames, expected_clusters) in [(50usize, 5usize), (3000, 300), (7, 1)] {
+        for (n_frames, expected_clusters) in [(50usize, 17usize), (3000, 1000), (7, 3)] {
             let (stream, clusters) = {
-                let mut muxer = WebmMuxer::new();
+                let mut muxer = WebmMuxer::default();
                 let (s, c) = feed_frames(&mut muxer, n_frames);
                 (s, c)
             };
             assert_eq!(
                 clusters.len(),
                 expected_clusters,
-                "cluster count for {n_frames} frames (200 ms / 64 KiB flush rules)"
+                "cluster count for {n_frames} frames (60 ms / 64 KiB flush rules)"
             );
             let segments = WebmSegmenter::new(DEFAULT_MAX_SEGMENT_SIZE)
                 .feed(&stream)
@@ -364,7 +382,7 @@ mod tests {
     /// G1: one-byte-at-a-time feeding also round-trips.
     #[test]
     fn round_trip_one_byte_at_a_time() {
-        let mut muxer = WebmMuxer::new();
+        let mut muxer = WebmMuxer::default();
         let (stream, clusters) = feed_frames(&mut muxer, 123);
         let mut segmenter = WebmSegmenter::new(DEFAULT_MAX_SEGMENT_SIZE);
         let mut segments = Vec::new();
@@ -570,26 +588,28 @@ mod tests {
 
     #[test]
     fn cluster_and_block_layout() {
-        let mut muxer = WebmMuxer::new();
+        let mut muxer = WebmMuxer::default();
         let _init = WebmMuxer::init_segment();
         let mut clusters = Vec::new();
-        // 200 ms of frames, then 3 more: the time cap closes at frames 10
-        // and 20, the final 3 flush at the end.
+        // 60 ms of frames is 3 frames: the time cap closes at frames 3, 6,
+        // 9, …, and the final 2 of the 23 frames flush at the end.
         for frame in 0..23 {
             let packet = [0xAB; 10];
             let tc = frame as u64 * OPUS_FRAME_MS;
             clusters.extend(muxer.add_block(tc, &packet));
         }
         clusters.push(muxer.flush().unwrap());
-        assert_eq!(clusters.len(), 3, "clusters at 0, 200, 400 ms");
-        let expected_starts = [0u64, 200, 400];
+        assert_eq!(clusters.len(), 8, "clusters at 0, 60, 120, …, 420 ms");
+        let expected_starts: Vec<u64> = (0..8).map(|i| i * 60).collect();
         for (i, cluster) in clusters.iter().enumerate() {
             let els = walk(cluster);
             assert_eq!(els.len(), 1, "a cluster element has one id");
             assert_eq!(els[0].0, CLUSTER_ID);
             let (tc, blocks) = parse_cluster_payload(&els[0].1);
             assert_eq!(tc, expected_starts[i], "cluster {i} timecode");
-            let expected_blocks = if i < 2 { 10 } else { 3 };
+            // B1: every time-closed cluster holds exactly 3 frames; only
+            // the flushed tail is short.
+            let expected_blocks = if i < 7 { 3 } else { 2 };
             assert_eq!(blocks.len(), expected_blocks, "blocks in cluster {i}");
             for (j, block) in blocks.iter().enumerate() {
                 assert_eq!(block[0], 0x81, "track number (1-byte vint 1)");
@@ -602,11 +622,32 @@ mod tests {
     }
 
     #[test]
+    fn cluster_time_is_configurable() {
+        // 100 ms: 5 frames per cluster; 50 frames fill exactly 10 clusters,
+        // the last of which the time cap never closes (it would need a 51st
+        // frame), so the final flush closes it.
+        let mut muxer = WebmMuxer::with_cluster_time(100);
+        let mut clusters = Vec::new();
+        for frame in 0..50u64 {
+            let packet = [0xAB; 10];
+            clusters.extend(muxer.add_block(frame * OPUS_FRAME_MS, &packet));
+        }
+        assert_eq!(clusters.len(), 9, "time cap closed the first 9");
+        clusters.push(muxer.flush().unwrap());
+        assert_eq!(clusters.len(), 10, "flush closes the open tenth");
+        for (i, cluster) in clusters.iter().enumerate() {
+            let (tc, blocks) = parse_cluster_payload(&walk(cluster)[0].1);
+            assert_eq!(tc, i as u64 * 100, "cluster {i} timecode");
+            assert_eq!(blocks.len(), 5, "blocks in cluster {i}");
+        }
+    }
+
+    #[test]
     fn byte_cap_closes_cluster() {
-        let mut muxer = WebmMuxer::new();
-        // 4 KiB packets with 1 ms-apart timecodes: the 200 ms time cap
-        // never fires, so the 64 KiB byte cap decides — it holds 15 blocks
-        // (a 16th would overflow).
+        let mut muxer = WebmMuxer::default();
+        // 4 KiB packets with 1 ms-apart timecodes: the 60 ms time cap
+        // never fires (only 16 ms of timecodes), so the 64 KiB byte cap
+        // decides — it holds 15 blocks (a 16th would overflow).
         let big = [0u8; 4096];
         // 1-byte id + 2-byte size vint (data is 4100 > 126) + 4-byte header + payload.
         let block_len = 1 + 2 + 4 + big.len();
