@@ -4,8 +4,9 @@
 //
 //   A. Deterministic/offline: UBC125_AUDIO_CMD = tests/paced_file.py over
 //      /tmp/cap.webm (a finite WebM/Opus file, streamed over ~4 s — a bare
-//      `cat` would outpace the 64-slot broadcast channel and the stream
-//      would die with Lagged before the first chunk). Play -> connecting
+//      `cat` would dump the whole file in one burst, so a client with the
+//      8-slot subscriber queue would only ever see its last chunks before
+//      the generation ended). Play -> connecting
 //      -> playing; file ends -> the generation ends cleanly ->
 //      reconnecting; the next generation replays from the top (fresh init,
 //      fresh MediaSource) -> playing again. Stop releases the source
@@ -13,9 +14,16 @@
 //
 //   B. Continuous + throttled client: UBC125_AUDIO_CMD = `ubc125
 //      audio-tone --loop` (faster than real time, so a slow client cannot
-//      keep up). With a 64 KB/s downlink the server-side broadcast channel
-//      lags, the stream ends as an error, and the client cycles through
-//      "reconnecting". Unthrottled, a generation flows to "playing".
+//      keep up). With a 64 KB/s downlink the subscriber's queue fills and
+//      the server drops the oldest chunks (drop-oldest, B5) instead of
+//      ending the stream, so the client stays "playing" and there is no
+//      reconnect cycle — the audio it lost is gone.
+//      The dropped chunks leave holes in the buffered timeline, and
+//      MediaSource stops the playhead at a hole instead of noticing: the
+//      label keeps saying "playing" over silent audio (measured: frozen at
+//      t=9.29 s for 28 of 39 500 ms samples before B8 existed). So phase B
+//      asserts two things — no reconnect, and the playhead still advancing
+//      while throttled (B8 gap-skip, see gapSkip in lib/audio.js).
 //
 //   C. Late joiner (second browser): a client that joins a running
 //      generation receives clusters whose timecodes begin at the
@@ -103,11 +111,12 @@ execSync(
   `rm -f /tmp/cap.webm; ${bin} audio-tone --out /tmp/cap.webm --duration 60`,
   { stdio: "inherit", shell: "/bin/bash" },
 );
-// Pace the file over ~4 s: `cat` would dump it in milliseconds and the
-// 64-slot broadcast channel would overflow before the client's first poll
-// (Lagged before the first chunk; the stream dies with zero data). Paced,
-// the faster-than-real-time stream is slow enough to keep up, and it ends
-// well inside the wait windows below.
+// Pace the file over ~4 s: a bare `cat` would dump it in milliseconds and
+// the generation would end before the client's first poll. Paced, the
+// faster-than-real-time stream ends well inside the wait windows below.
+// (With drop-oldest, B5, a fast source no longer kills the stream — it
+// discards stale chunks — so pacing is a timing convenience, not a
+// liveness requirement.)
 console.log("starting stack (paced file audio source)...");
 execSync(
   `UBC125_AUDIO_CMD="python3 ${root}/tests/paced_file.py /tmp/cap.webm 4" bash ${stack}`,
@@ -160,28 +169,59 @@ await p.reload({ waitUntil: "networkidle2" });
 await sleep(1500);
 
 // 64 KB/s downlink: the faster-than-real-time tone source outruns the
-// 64-slot broadcast channel, the server ends the stream as an error, and
-// the client must cycle through reconnecting.
+// subscriber's 8-slot queue. With drop-oldest (B5) the server keeps the
+// stream alive and discards stale chunks instead of ending it, so the
+// client must stay "playing" (audio is dropped, not a reconnect cycle).
 await p.emulateNetworkConditions({
   latency: 0,
   download: 64 * 1024,
   upload: 8 * 1024,
 });
+// The playhead, sampled around the throttled window (B8's proof).
+const playhead = () =>
+  p.evaluate(() => {
+    const a = window.__ubc125?.audioStream?._audio;
+    return a ? a.currentTime : null;
+  });
+const tBefore = await playhead();
 ok(await clickBtn("p"), "Play clicked (throttled)");
-const seenThrottled = await watchAudio("reconnecting", 45000);
+const seenThrottled = await watchAudio("playing", 30000);
 ok(
-  seenThrottled.includes("reconnecting"),
-  `throttled client lags -> reconnecting (saw: ${seenThrottled.join(" -> ")})`,
+  seenThrottled.includes("playing"),
+  `throttled client drops audio but stays playing (saw: ${seenThrottled.join(" -> ")})`,
 );
 ok(!seenThrottled.includes("unavailable"), "never 'unavailable' (codec is supported)");
-
-// Unthrottle: the next generation should flow to playing.
-await p.emulateNetworkConditions(null);
-const seenUnthrottled = await watchAudio("playing", 20000);
+// Sample the state for a window: the old behavior cycled through
+// "reconnecting" within a few seconds of the backlog building, so a clean
+// window proves the stream stayed alive (B5).
+const seenWindow = [];
+const winEnd = Date.now() + 12000;
+while (Date.now() < winEnd) {
+  const s = await audioState();
+  if (s && (seenWindow.length === 0 || seenWindow[seenWindow.length - 1] !== s)) seenWindow.push(s);
+  await sleep(300);
+}
 ok(
-  seenUnthrottled.includes("playing"),
-  `unthrottled -> playing (saw: ${seenUnthrottled.join(" -> ")})`,
+  !seenWindow.includes("reconnecting"),
+  `no reconnect churn while throttled (saw: ${seenWindow.join(" -> ")})`,
 );
+const tDuring = await playhead();
+// A frozen playhead under a "playing" label is silent audio: MediaSource
+// stopped it at a hole left by the dropped chunks and nothing skipped it.
+const advanced =
+  tBefore !== null && tDuring !== null && tDuring > tBefore + 1;
+ok(
+  "playhead advances while throttled (B8 gap-skip, not a silent freeze)",
+  "t advanced > 1s during the throttle window",
+  `t ${tBefore?.toFixed(2)} -> ${tDuring?.toFixed(2)}`,
+  advanced,
+);
+
+// Unthrottle: playback should keep flowing (still playing).
+await p.emulateNetworkConditions(null);
+await sleep(2000);
+const sAfter = await audioState();
+ok(sAfter === "playing", `still playing after unthrottle (saw: ${sAfter})`);
 // -- phase C: late joiner (second browser) -----------------------------------
 
 const p2 = await b.newPage();
