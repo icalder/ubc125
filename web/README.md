@@ -22,6 +22,8 @@ web/
     tests/         # node --test unit tests for the pure logic (freq, bank, backoff, audio)
   node_modules/    # dev-only (protoc-gen-es for codegen); not used at runtime
   package.json
+  smoke.mjs        # gRPC-Web smoke test against `serve` (node, no browser)
+  run_smoke.sh     # fake-scanner stack + smoke.mjs, then teardown
 ```
 
 There is no `src/` — development happens directly in `dist/`. The directory
@@ -92,6 +94,21 @@ and display formatting; bank labels/ranges/cursor math; the backoff
 schedule; audio chunk bookkeeping). Browser-level verification is scripted
 in `tests/web_e2e.md` (run with the browser-tools skill against the fake
 scanner) — not part of `node --test`.
+
+Between the two sits a client-side protocol smoke test: it drives the real
+grpc-web transport (the same `@connectrpc` packages the browser uses) from
+node against the fake scanner — no browser, no page.
+
+```sh
+bash web/run_smoke.sh          # stack up, 4 checks, stack down (~3 s)
+bash web/run_smoke.sh --keep   # leave the stack up for further poking
+node web/smoke.mjs http://host:50051   # checks only, against a running server
+```
+
+`run_smoke.sh` reuses `tests/ubc125_stack.sh` (socat pty pair →
+`tests/fake_scanner.py` → `serve` on `127.0.0.1:50051`), builds the debug
+binary if missing, and kills the stack afterwards unless `--keep`. Logs go
+to `/tmp/fake.log` and `/tmp/serve.log`.
 
 ## Audio
 
