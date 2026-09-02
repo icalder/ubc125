@@ -245,18 +245,16 @@ impl AudioBroadcaster {
         }
         {
             let mut state = self.inner.state();
-            if let Some(active) = &mut state.generation {
-                if !active.finished {
-                    active.subscribers += 1;
-                    active.stopping = false;
-                    debug!(gen_id = active.id, "audio subscriber joined running generation");
-                    return Ok(AudioSubscription {
-                        sender: active.sender.clone(),
-                        cached_init: active.cached_init.clone(),
-                        inner: Arc::clone(&self.inner),
-                        gen_id: active.id,
-                    });
-                }
+            if let Some(active) = &mut state.generation && !active.finished {
+                active.subscribers += 1;
+                active.stopping = false;
+                debug!(gen_id = active.id, "audio subscriber joined running generation");
+                return Ok(AudioSubscription {
+                    sender: active.sender.clone(),
+                    cached_init: active.cached_init.clone(),
+                    inner: Arc::clone(&self.inner),
+                    gen_id: active.id,
+                });
             }
         }
 

@@ -405,10 +405,10 @@ mod tests {
         assert_eq!(rebuilt, stream);
     }
 
-    /// G2: field-level checks on the emitted init segment and clusters.
-    ///
-    /// A tiny recursive EBML walker (id, size, payload) parses our own
-    /// output; the assertions pin the exact values Chromium requires.
+    // G2: field-level checks on the emitted init segment and clusters.
+    //
+    // A tiny recursive EBML walker (id, size, payload) parses our own
+    // output; the assertions pin the exact values Chromium requires.
 
     /// Width of a vint from its first byte: 0x80-0xFF is 1 byte,
     /// 0x40-0x7F is 2, 0x10-0x3F is 4, 0x01-0x07 is 8.
@@ -433,11 +433,11 @@ mod tests {
         const TWO: [u16; 8] = [
             0x4282, 0x4286, 0x4287, 0x42F7, 0x4D80, 0x536E, 0x5741, 0x63A2,
         ];
-        const THREE: [u32; 2] = [0x2AD7_B1, 0x4042_0F];
+        const THREE: [u32; 2] = [0x002A_D7B1, 0x0040_420F];
         const FOUR: [u32; 5] = [
             0x1A45_DFA3, 0x1549_A966, 0x1654_AE6B, 0x1853_8067, 0x1F43_B675,
         ];
-        if rest.len() >= 1 && ONE.contains(&rest[0]) {
+        if !rest.is_empty() && ONE.contains(&rest[0]) {
             return 1;
         }
         if rest.len() >= 2 {
@@ -489,10 +489,11 @@ mod tests {
             let size = size & mask;
             rest = &rest[slen..];
             // An all-ones size is "unknown": the element runs to the end
-            // of the buffer (true for the top-level Segment).
+            // of the buffer (true for the top-level Segment), consuming
+            // everything left.
             let payload = if size == mask {
                 let payload = rest.to_vec();
-                rest = &rest[rest.len()..];
+                rest = &[];
                 payload
             } else {
                 let payload = rest[..size as usize].to_vec();
@@ -519,7 +520,7 @@ mod tests {
         (tc, blocks)
     }
 
-    fn find<'a>(els: &'a [(u32, Vec<u8>)], id: u32) -> &'a [u8] {
+    fn find(els: &[(u32, Vec<u8>)], id: u32) -> &[u8] {
         els.iter()
             .find(|(eid, _)| *eid == id)
             .map(|(_, p)| p.as_slice())

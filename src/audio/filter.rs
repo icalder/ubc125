@@ -30,18 +30,3 @@ pub trait PcmFrameFilter: Send + Sync {
     /// A fresh-state instance for a new capture generation.
     fn for_capture(&self) -> Box<dyn PcmFrameFilter>;
 }
-
-/// Null filter: frames pass through untouched. Serves as the explicit
-/// "filter in the chain but doing nothing" case (byte-identical to no
-/// filter at all — see the seam regression test in
-/// [`crate::audio::native`]).
-#[derive(Debug, Default, Clone)]
-pub struct PassThrough;
-
-impl PcmFrameFilter for PassThrough {
-    fn process_frame(&mut self, _frame: &mut [i16]) {}
-
-    fn for_capture(&self) -> Box<dyn PcmFrameFilter> {
-        Box::new(PassThrough)
-    }
-}

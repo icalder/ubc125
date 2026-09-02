@@ -553,7 +553,7 @@ mod tests {
     fn canned_polls(n_glg_after_first: usize) -> Vec<&'static str> {
         let mut responses = vec![GLG_OK];
         responses.extend_from_slice(&SCG_CYCLE);
-        responses.extend(std::iter::repeat(GLG_OK).take(n_glg_after_first));
+        responses.extend(std::iter::repeat_n(GLG_OK, n_glg_after_first));
         responses
     }
     /// The alternating mask `SCG_ALT` as the UI/server see it.

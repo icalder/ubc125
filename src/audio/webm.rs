@@ -507,8 +507,8 @@ pub(crate) mod fixtures {
         } else if value <= 0x0FFF_FFFE {
             vec![
                 0x10 | ((value >> 24) as u8 & 0x0F),
-                ((value >> 16) as u8 & 0xFF),
-                ((value >> 8) as u8 & 0xFF),
+                (value >> 16) as u8,
+                (value >> 8) as u8,
                 value as u8,
             ]
         } else {
@@ -525,9 +525,8 @@ pub(crate) mod fixtures {
     /// `size` of `None` encodes an unknown (infinite) size.
     pub(crate) fn element(id: u32, size: Option<u64>, payload: &[u8]) -> Vec<u8> {
         let mut out = id_bytes(id);
-        match size {
-            Some(s) => assert_eq!(s as usize, payload.len()),
-            None => {}
+        if let Some(s) = size {
+            assert_eq!(s as usize, payload.len());
         }
         out.extend(match size {
             Some(s) => vint_size(s),
@@ -620,7 +619,7 @@ mod tests {
         stream.extend_from_slice(&segment_header);
         stream.extend(element(SEEK_HEAD_ID, Some(13), b"seekhead-data"));
         // ffmpeg leaves a reserved-space Void (zeros) on non-seekable output.
-        stream.extend(element(VOID_ID, Some(16), &vec![0u8; 16]));
+        stream.extend(element(VOID_ID, Some(16), &[0u8; 16]));
         stream.extend(element(INFO_ID, Some(9), b"info-data"));
         stream.extend(element(TRACKS_ID, Some(16), b"tracks-data-here"));
         stream.extend(element(CLUSTER_ID, Some(4), b"clst"));
@@ -676,8 +675,8 @@ mod tests {
             (0x4000, 4),
             (0x0ABCDE, 4),
             (300_000, 4),
-            (0x0FFFF_FFE, 4),
-            (0x0FFFF_FFF, 8),
+            (0x0FFF_FFFE, 4),
+            (0x0FFF_FFFF, 8),
             (0x1000_0000, 8),
         ];
         for (value, width) in cases {
@@ -770,7 +769,7 @@ mod tests {
             panic!("expected init first")
         };
         assert!(
-            init.windows(4).any(|w| w == &SEEK_HEAD_ID.to_be_bytes()),
+            init.windows(4).any(|w| w == SEEK_HEAD_ID.to_be_bytes()),
             "init must contain the SeekHead element"
         );
         assert!(matches!(segments[1], Segment::Media(_)));

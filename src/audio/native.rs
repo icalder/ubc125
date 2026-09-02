@@ -173,16 +173,14 @@ impl CaptureSource for AlsaOpusSource {
     }
 }
 
-/// Deterministic tone source: the native pipeline (including the optional
-/// PCM filter) over a sine, no ALSA — the offline-simulation test
-/// pattern. Emits `duration` of audio as fast as possible, then ends
-/// cleanly.
+/// Deterministic tone source: the native pipeline over a sine, no ALSA —
+/// the offline-simulation test pattern. Emits `duration` of audio as fast
+/// as possible, then ends cleanly.
 #[derive(Clone)]
 pub struct ToneSource {
     freq: f64,
     duration: Duration,
     bitrate: u32,
-    filter: Option<Arc<dyn PcmFrameFilter>>,
 }
 
 impl ToneSource {
@@ -191,14 +189,7 @@ impl ToneSource {
             freq,
             duration,
             bitrate: bitrate_bps,
-            filter: None,
         }
-    }
-
-    /// Set the real-time PCM filter (see [`AlsaOpusSource::with_filter`]).
-    pub fn with_filter(mut self, filter: Arc<dyn PcmFrameFilter>) -> Self {
-        self.filter = Some(filter);
-        self
     }
 }
 
@@ -208,7 +199,6 @@ impl std::fmt::Debug for ToneSource {
             .field("freq", &self.freq)
             .field("duration", &self.duration)
             .field("bitrate", &self.bitrate)
-            .field("filter", &self.filter.as_ref().map(|_| "present"))
             .finish()
     }
 }
@@ -231,13 +221,12 @@ impl CaptureSource for ToneSource {
             let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
             let cancel = stop.cancel.subscribe();
             let task_stop = std::sync::Arc::clone(&stop);
-            let filter = self.filter.as_ref().map(|f| f.for_capture());
             let config = AudioPipelineConfig {
                 bitrate_bps: bitrate,
                 ..AudioPipelineConfig::default()
             };
             tokio::task::spawn_blocking(move || {
-                run_tone_capture(tx, task_stop, cancel, freq, duration, config, filter);
+                run_tone_capture(tx, task_stop, cancel, freq, duration, config);
             });
             Ok(CaptureHandle { rx, stop })
         })
@@ -379,7 +368,6 @@ fn run_tone_capture(
     freq: f64,
     duration: Duration,
     config: AudioPipelineConfig,
-    mut filter: Option<Box<dyn PcmFrameFilter>>,
 ) {
     let mut pipeline = match WebmOpusPipeline::new(&config) {
         Ok(p) => p,
@@ -402,7 +390,7 @@ fn run_tone_capture(
         if sample_index >= total_samples {
             break SourceExit::Clean;
         }
-        let mut frame: Vec<i16> = (0..FRAME_SAMPLES)
+        let frame: Vec<i16> = (0..FRAME_SAMPLES)
             .map(|i| {
                 let t = (sample_index + i as u64) as f64 / 48_000.0;
                 (TONE_AMPLITUDE * (2.0 * std::f64::consts::PI * freq * t).sin())
@@ -411,9 +399,6 @@ fn run_tone_capture(
             .map(|s| s.round() as i16)
             .collect();
         sample_index += FRAME_SAMPLES as u64;
-        if let Some(f) = filter.as_mut() {
-            f.process_frame(&mut frame);
-        }
         let Ok(closed) = pipeline.add_frame(&frame) else {
             finish(&tx, &stop, SourceExit::Failed("encode failed".into()));
             return;
@@ -425,24 +410,6 @@ fn run_tone_capture(
             }
         }
     };
-    if let Some(f) = filter.as_mut() {
-        for frame in f.flush() {
-            // Zero-pad a ragged final held chunk to a full frame (see the
-            // reader loop); at most 20 ms of trailing silence.
-            let mut padded = frame;
-            padded.resize(FRAME_SAMPLES, 0);
-            let Ok(closed) = pipeline.add_frame(&padded) else {
-                finish(&tx, &stop, SourceExit::Failed("encode failed".into()));
-                return;
-            };
-            for cluster in closed {
-                if !send_bytes(&tx, cluster) {
-                    stop.mark_exited();
-                    return;
-                }
-            }
-        }
-    }
     if let Some(cluster) = pipeline.flush() {
         send_bytes(&tx, cluster);
     }
@@ -549,6 +516,18 @@ mod tests {
         (CaptureHandle { rx, stop }, close_count)
     }
 
+    /// Null filter: frames pass through untouched — the explicit "filter in
+    /// the chain but doing nothing" case (byte-identical to no filter).
+    struct NullFilter;
+
+    impl PcmFrameFilter for NullFilter {
+        fn process_frame(&mut self, _frame: &mut [i16]) {}
+
+        fn for_capture(&self) -> Box<dyn PcmFrameFilter> {
+            Box::new(NullFilter)
+        }
+    }
+
     /// A filter that negates every sample: proves the seam is in the
     /// encode path (its bytes must differ from the unfiltered run).
     struct SignFlip;
@@ -616,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn filter_off_is_byte_identical_to_pre_seam_pipeline() {
         let no_filter = run_reader_bytes(None).await;
-        let pass_through = run_reader_bytes(Some(Box::new(crate::audio::filter::PassThrough))).await;
+        let pass_through = run_reader_bytes(Some(Box::new(NullFilter))).await;
         let sign_flip = run_reader_bytes(Some(Box::new(SignFlip))).await;
         assert!(!no_filter.is_empty(), "pipeline emitted nothing");
         assert_eq!(

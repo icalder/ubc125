@@ -205,13 +205,13 @@ fn write_wav_header<W: Write>(w: &mut W, data_size: u32) -> std::io::Result<()> 
     w.write_all(&riff_size.to_le_bytes())?;
     w.write_all(b"WAVE")?;
     w.write_all(b"fmt ")?;
-    w.write_all(&16u32.to_le_bytes());
-    w.write_all(&1u16.to_le_bytes()); // PCM
-    w.write_all(&1u16.to_le_bytes()); // mono
-    w.write_all(&48_000u32.to_le_bytes());
-    w.write_all(&(48_000u32 * 2).to_le_bytes()); // byte rate
-    w.write_all(&2u16.to_le_bytes()); // block align
-    w.write_all(&16u16.to_le_bytes()); // bits
+    w.write_all(&16u32.to_le_bytes())?;
+    w.write_all(&1u16.to_le_bytes())?; // PCM
+    w.write_all(&1u16.to_le_bytes())?; // mono
+    w.write_all(&48_000u32.to_le_bytes())?;
+    w.write_all(&(48_000u32 * 2).to_le_bytes())?; // byte rate
+    w.write_all(&2u16.to_le_bytes())?; // block align
+    w.write_all(&16u16.to_le_bytes())?; // bits
     w.write_all(b"data")?;
     w.write_all(&data_size.to_le_bytes())
 }
@@ -413,7 +413,7 @@ async fn dump_stream(
                 eprintln!("stream {name}: play sink flush failed (pipe closed?); stopping");
                 break;
             }
-            if res.n_media % 25 == 0 {
+            if res.n_media.is_multiple_of(25) {
                 eprintln!("stream {name}: t={}s", elapsed_audio_ms / 1000);
             }
         }
